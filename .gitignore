@@ -1,0 +1,21 @@
+# uv / virtualenv
+# SETUP/requirements.lock is generated but IS committed -- it is the shared pin set.
+.venv/
+
+# tonic is git-cloned by the notebook at runtime, not vendored
+tonic/
+Ressources/tonic/
+
+# Notebook + rendering artifacts
+output_videos/
+Ressources/output_videos/
+.ipynb_checkpoints/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# MuJoCo / OS noise
+MUJOCO_LOG.TXT
+.DS_Store
+Thumbs.db

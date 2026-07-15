@@ -1,0 +1,38 @@
+# Dependencies for the Macrocircuits notebooks (Ressources/*.ipynb).
+#
+# This is the file you edit by hand. After changing it, regenerate the pinned
+# lock file so everyone installs the same versions:
+#
+#     uv pip compile SETUP/requirements.txt --universal -o SETUP/requirements.lock
+#
+# See SETUP/README.md for the full setup instructions.
+
+# Scientific stack
+numpy>=1.26
+pandas>=2.0
+matplotlib>=3.8
+seaborn>=0.13
+networkx>=3.0
+pyyaml>=6.0
+
+# Video writing for display_video() / write_video()
+imageio>=2.34
+imageio-ffmpeg>=0.5
+
+# MuJoCo physics + the DeepMind control suite (provides the Swimmer env)
+dm-control>=1.0.16
+
+# Deep learning. Plain PyPI torch is CPU-only on Windows; see SETUP/README.md
+# for the one-line uv command that installs a CUDA build instead.
+torch>=2.2
+
+# Dependencies of the tonic RL library. Tonic itself is not installed from PyPI
+# -- the notebook git-clones neuromatch/tonic and imports it from the checkout.
+# gym is unmaintained and tonic relies on its pre-Gymnasium API, so it stays pinned.
+gym==0.26.2
+termcolor>=2.0
+
+# Jupyter runtime
+ipykernel>=6.29
+ipywidgets>=8.1
+notebook>=7.0
