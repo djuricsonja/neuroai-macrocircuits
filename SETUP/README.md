@@ -78,10 +78,16 @@ one file serves every collaborator.
 
 ## Notes
 
-- **tonic is not a dependency.** The notebook `git clone`s
-  [neuromatch/tonic](https://github.com/neuromatch/tonic) and imports it from
-  the checkout. Its requirements (`gym`, `termcolor`, and the scientific stack)
-  are included in `requirements.txt` so the clone works straight away.
+- **The notebooks only orchestrate.** Every function and class they call lives in
+  the `macrocircuits` package under `src/`. The notebooks add `src/` to
+  `sys.path` in their first cell, so no install step is needed — but it does mean
+  a notebook has to be run with `Ressources/` as the working directory, which is
+  what Jupyter and VS Code do by default.
+- **tonic is not a dependency.** `ensure_tonic()` (called from the notebook)
+  `git clone`s [neuromatch/tonic](https://github.com/neuromatch/tonic) into
+  `Ressources/tonic` and imports it from the checkout. Its requirements (`gym`,
+  `termcolor`, and the scientific stack) are included in `requirements.txt` so
+  the clone works straight away.
 - **`gym` is pinned to 0.26.2** and prints a loud deprecation warning on import.
   That is expected — tonic depends on the pre-Gymnasium API. It works correctly
   with the NumPy 2.x in the lock file despite what the warning claims.
