@@ -140,6 +140,12 @@ class SwimmerModule(nn.Module):
         inh = self.inh
         ws = self.ws
 
+        # Record connections only when asked. The visualization path keeps the default
+        # (log_activity=True); long training runs -- evolution strategies calls forward
+        # millions of times -- pass log_activity=False so connections_log can't grow
+        # without bound.
+        log = self.log_activity if log_activity else (lambda *a, **kw: None)
+
         # Separate into dorsal and ventral sensor values in [0, 1], shape (..., n_joints).
         joint_pos_d = joint_pos.clamp(min=0, max=1)
         joint_pos_v = joint_pos.clamp(min=-1, max=0).neg()
@@ -159,8 +165,8 @@ class SwimmerModule(nn.Module):
                     ..., i - 1, None] * exc(self.params[ws(f'bneuron_d_prop_{i}', 'bneuron_prop')])
                 bneuron_v = bneuron_v + joint_pos_v[
                     ..., i - 1, None] * exc(self.params[ws(f'bneuron_v_prop_{i}', 'bneuron_prop')])
-                self.log_activity('exc', f'bneuron_d_prop_{i}')
-                self.log_activity('exc', f'bneuron_v_prop_{i}')
+                log('exc', f'bneuron_d_prop_{i}')
+                log('exc', f'bneuron_v_prop_{i}')
 
             # Speed control unit modulates all B-neurons.
             if self.include_speed_control:
@@ -170,8 +176,8 @@ class SwimmerModule(nn.Module):
                 bneuron_v = bneuron_v + speed_control * inh(
                     self.params[ws(f'bneuron_v_speed_{i}', 'bneuron_speed')]
                 )
-                self.log_activity('inh', f'bneuron_d_speed_{i}')
-                self.log_activity('inh', f'bneuron_v_speed_{i}')
+                log('inh', f'bneuron_d_speed_{i}')
+                log('inh', f'bneuron_v_speed_{i}')
 
             # Turn control units modulate head B-neurons.
             if self.include_turn_control and i < self.n_turn_joints:
@@ -185,8 +191,8 @@ class SwimmerModule(nn.Module):
                 bneuron_v = bneuron_v + turn_control_v * exc(
                     self.params[ws(f'bneuron_v_turn_{i}', 'bneuron_turn')]
                 )
-                self.log_activity('exc', f'bneuron_d_turn_{i}')
-                self.log_activity('exc', f'bneuron_v_turn_{i}')
+                log('exc', f'bneuron_d_turn_{i}')
+                log('exc', f'bneuron_v_turn_{i}')
 
             # Oscillator units modulate first B-neurons.
             if self.include_head_oscillators and i == 0:
@@ -210,8 +216,8 @@ class SwimmerModule(nn.Module):
                     self.params[ws(f'bneuron_v_osc_{i}', 'bneuron_osc')]
                 )
 
-                self.log_activity('exc', f'bneuron_d_osc_{i}')
-                self.log_activity('exc', f'bneuron_v_osc_{i}')
+                log('exc', f'bneuron_d_osc_{i}')
+                log('exc', f'bneuron_v_osc_{i}')
 
             # B-neuron activation.
             bneuron_d = graded(bneuron_d)

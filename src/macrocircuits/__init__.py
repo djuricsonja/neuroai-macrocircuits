@@ -5,7 +5,8 @@ The notebooks in `Ressources/` orchestrate; the implementation lives here:
 - `video`       -- writing rollout frames to mp4 and showing them inline
 - `envs`        -- the swimmer environments and swim tasks
 - `tonic_setup` -- cloning the tonic RL library on demand
-- `training`    -- training agents and replaying checkpoints
+- `training`    -- training agents (tonic RL) and replaying checkpoints
+- `es`          -- training NCAP / an MLP baseline with Evolution Strategies
 - `models`      -- actor-critic factories for the MLP baseline and NCAP
 - `constraints` -- weight/activation constraints and initializers
 - `ncap`        -- the C.-elegans-inspired swimmer circuit
@@ -15,19 +16,24 @@ Importing this package registers the `swim`, `swim_12_links`, and `swim_to_ball`
 tasks with the dm_control swimmer suite, so `suite.load('swimmer', 'swim')` resolves.
 
 `training` and `models` are deliberately not re-exported here: they import
-tonic, which `ensure_tonic()` has to clone first.
+tonic, which `ensure_tonic()` has to clone first. `es` is tonic-free (pure torch +
+dm_control), so its entry points are re-exported below.
 """
 
 from macrocircuits.envs import Swim, SwimToBall, render, test_dm_control
+from macrocircuits.es import EvolutionStrategy, run_es, es_run_path
 from macrocircuits.tonic_setup import ensure_tonic
 from macrocircuits.video import display_video, write_video
 
 __all__ = [
+    'EvolutionStrategy',
     'Swim',
     'SwimToBall',
     'display_video',
     'ensure_tonic',
+    'es_run_path',
     'render',
+    'run_es',
     'test_dm_control',
     'write_video',
 ]

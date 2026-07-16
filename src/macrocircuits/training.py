@@ -16,7 +16,16 @@ from macrocircuits.video import display_video
 
 # Imported so that the code strings passed to train() and stored in config.yaml --
 # e.g. 'tonic.torch.agents.PPO(model=ppo_mlp_model(...))' -- resolve when eval'd.
-from macrocircuits.models import d4pg_swimmer_model, ppo_mlp_model, ppo_swimmer_model
+# run_config() only builds PPO/A2C/TRPO strings, but the off-policy factories are
+# imported too so a hand-written DDPG/D4PG agent string passed to train() resolves.
+from macrocircuits.models import (
+    d4pg_mlp_model,
+    d4pg_swimmer_model,
+    ddpg_mlp_model,
+    ddpg_swimmer_model,
+    ppo_mlp_model,
+    ppo_swimmer_model,
+)
 
 
 def _eval_namespace():
@@ -34,6 +43,103 @@ def _eval_namespace():
     if caller is not None:
         namespace.update(caller.f_globals)
     return namespace
+
+
+# RL method -> (tonic agent class, actor-updater class). All three drive the same
+# stochastic ActorCritic the model factories build, so they are interchangeable here.
+# The actor updater is named so run_config() can turn on gradient clipping for it;
+# TRPO's trust-region update already bounds each step, so it has none (None).
+_RL_AGENTS = {
+    'ppo': ('PPO', 'ClippedRatio'),
+    'a2c': ('A2C', 'StochasticPolicyGradient'),
+    'trpo': ('TRPO', None),
+}
+
+# Swimmer body length (rigid links) -> the dm_control task macrocircuits.envs
+# registers on import. Only these two lengths exist.
+_SWIM_TASKS = {6: 'swim', 12: 'swim_12_links'}
+
+
+def _run_name(network, rl_method):
+    return f'{network}_{rl_method}'
+
+
+def run_config(
+    network,
+    rl_method='ppo',
+    n_links=6,
+    actor_sizes=(256, 256),
+    critic_sizes=(256, 256),
+    action_noise=0.1,
+    gradient_clip=0.5,
+):
+    """Assemble the code strings train() needs for one (network, algorithm, body) choice.
+
+    train() takes its agent and environment as Python *source strings* and eval's
+    them (see _eval_namespace). This turns the notebook's plain parameters into the
+    matching factory calls so the notebook itself stays declarative.
+
+    Parameters:
+    - network:   'mlp'  -- generic fully-connected baseline, or
+                 'ncap' -- the C. elegans-derived circuit prior. NCAP's actor reads
+                 the time feature the environment appends, so it is enabled for it.
+    - rl_method: on-policy tonic agent driving the stochastic policy: 'ppo', 'a2c', 'trpo'.
+    - n_links:   swimmer length. 6 -> 5 joints ('swim'), 12 -> 11 joints ('swim_12_links').
+    - actor_sizes/critic_sizes: MLP torso widths. NCAP's actor is the fixed circuit,
+                 so actor_sizes is used by the MLP baseline only; critic_sizes applies to both.
+    - action_noise: exploration std of the NCAP policy head.
+    - gradient_clip: max gradient norm per update (0 disables). The swimmer policy uses
+                 a small fixed action std, so without clipping a single large PPO/A2C
+                 step can blow the importance ratio up to inf and drive the weights to
+                 NaN; capping the step keeps the ratio bounded. Applied to the critic
+                 always, and to the actor except for TRPO (already trust-region bounded).
+
+    Returns (agent, environment, name), three strings ready to pass to train().
+    """
+    if rl_method not in _RL_AGENTS:
+        raise ValueError(f"rl_method must be one of {sorted(_RL_AGENTS)}, got {rl_method!r}")
+    if n_links not in _SWIM_TASKS:
+        raise ValueError(f"n_links must be one of {sorted(_SWIM_TASKS)}, got {n_links!r}")
+
+    agent_cls, actor_updater_cls = _RL_AGENTS[rl_method]
+    task = _SWIM_TASKS[n_links]
+    n_joints = n_links - 1
+
+    if network == 'mlp':
+        model = f'ppo_mlp_model(actor_sizes={actor_sizes}, critic_sizes={critic_sizes})'
+        time_feature = ''
+    elif network == 'ncap':
+        model = (
+            f'ppo_swimmer_model(n_joints={n_joints}, '
+            f'critic_sizes={critic_sizes}, action_noise={action_noise})'
+        )
+        # NCAP's SwimmerActor reads observations[..., -1] as the timestep, which tonic
+        # only appends when time_feature=True -- so it is required for this network.
+        time_feature = ', time_feature=True'
+    else:
+        raise ValueError(f"network must be 'mlp' or 'ncap', got {network!r}")
+
+    # Assemble the agent, enabling gradient clipping on its updaters (see the docstring).
+    agent_args = [f'model={model}']
+    if gradient_clip and actor_updater_cls:
+        agent_args.append(
+            f'actor_updater=tonic.torch.updaters.{actor_updater_cls}(gradient_clip={gradient_clip})'
+        )
+    if gradient_clip:
+        agent_args.append(
+            f'critic_updater=tonic.torch.updaters.VRegression(gradient_clip={gradient_clip})'
+        )
+    agent = f'tonic.torch.agents.{agent_cls}(' + ', '.join(agent_args) + ')'
+    environment = f'tonic.environments.ControlSuite("swimmer-{task}"{time_feature})'
+    return agent, environment, _run_name(network, rl_method)
+
+
+def run_path(network, rl_method='ppo', n_links=6):
+    """Data directory train() writes for this run -- pass to plot_performance / play_model."""
+    if n_links not in _SWIM_TASKS:
+        raise ValueError(f"n_links must be one of {sorted(_SWIM_TASKS)}, got {n_links!r}")
+    task = _SWIM_TASKS[n_links]
+    return f'data/local/experiments/tonic/swimmer-{task}/{_run_name(network, rl_method)}'
 
 
 def train(

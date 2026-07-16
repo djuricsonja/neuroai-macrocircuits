@@ -83,3 +83,66 @@ def d4pg_swimmer_model(
         ),
         observation_normalizer=normalizers.MeanStd(),
     )
+
+
+def ddpg_mlp_model(
+    actor_sizes=(256, 256),
+    actor_activation=nn.ReLU,
+    critic_sizes=(256, 256),
+    critic_activation=nn.ReLU,
+):
+    """MLP actor-critic for DDPG: deterministic policy head + action-value critic."""
+    return models.ActorCriticWithTargets(
+        actor=models.Actor(
+            encoder=models.ObservationEncoder(),
+            torso=models.MLP(actor_sizes, actor_activation),
+            head=models.DeterministicPolicyHead(),
+        ),
+        critic=models.Critic(
+            encoder=models.ObservationActionEncoder(),
+            torso=models.MLP(critic_sizes, critic_activation),
+            head=models.ValueHead(),
+        ),
+        observation_normalizer=normalizers.MeanStd(),
+    )
+
+
+def ddpg_swimmer_model(
+    n_joints=5,
+    critic_sizes=(256, 256),
+    critic_activation=nn.ReLU,
+    **swimmer_kwargs,
+):
+    """NCAP actor for DDPG: the deterministic circuit paired with an action-value critic."""
+    return models.ActorCriticWithTargets(
+        actor=SwimmerActor(swimmer=SwimmerModule(n_joints=n_joints, **swimmer_kwargs),),
+        critic=models.Critic(
+            encoder=models.ObservationActionEncoder(),
+            torso=models.MLP(critic_sizes, critic_activation),
+            head=models.ValueHead(),
+        ),
+        observation_normalizer=normalizers.MeanStd(),
+    )
+
+
+def d4pg_mlp_model(
+    actor_sizes=(256, 256),
+    actor_activation=nn.ReLU,
+    critic_sizes=(256, 256),
+    critic_activation=nn.ReLU,
+):
+    """MLP actor-critic for D4PG: deterministic policy head + distributional value critic."""
+    return models.ActorCriticWithTargets(
+        actor=models.Actor(
+            encoder=models.ObservationEncoder(),
+            torso=models.MLP(actor_sizes, actor_activation),
+            head=models.DeterministicPolicyHead(),
+        ),
+        critic=models.Critic(
+            encoder=models.ObservationActionEncoder(),
+            torso=models.MLP(critic_sizes, critic_activation),
+            # These values are for the control suite with 0.99 discount.
+            head=models.DistributionalValueHead(-150., 150., 51),
+        ),
+        observation_normalizer=normalizers.MeanStd(),
+    )
