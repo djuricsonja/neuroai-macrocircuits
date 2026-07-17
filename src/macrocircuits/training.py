@@ -60,8 +60,75 @@ _RL_AGENTS = {
 _SWIM_TASKS = {6: 'swim', 12: 'swim_12_links'}
 
 
-def _run_name(network, rl_method):
-    return f'{network}_{rl_method}'
+# Every key a run dict may set, and the value used when it does not set it. A run is
+# one training run: a network plus the algorithm, body, sizes and budget to train it
+# with. resolve_runs() validates run dicts against these keys, and run_config() takes
+# a resolved one as **kwargs -- so the two must stay in sync.
+_RUN_DEFAULTS = {
+    'rl_method': 'ppo',
+    'n_links': 6,
+    'actor_sizes': (256, 256),
+    'critic_sizes': (256, 256),
+    'action_noise': 0.1,
+    'gradient_clip': 0.5,
+    'steps': int(1e5),
+    'save_steps': int(5e4),
+    'label': None,
+}
+
+
+def _run_name(network, rl_method, label=None):
+    """Directory name for a run: its label, or '<network>_<rl_method>' if unlabelled."""
+    return label or f'{network}_{rl_method}'
+
+
+def resolve_runs(runs, defaults=None):
+    """Fill in each run dict and check that no two runs would train into the same directory.
+
+    Lets a notebook declare any number of runs while spelling out only what each one
+    varies:
+
+        resolve_runs(
+            [dict(network='ncap'), dict(network='mlp', label='mlp_wide')],
+            defaults=dict(rl_method='trpo'),
+        )
+
+    Values are taken from the run dict first, then `defaults`, then _RUN_DEFAULTS.
+
+    A run's directory is derived from its label (see _run_name), which defaults to
+    '<network>_<rl_method>'. Two runs that differ only in, say, critic_sizes would
+    therefore share a directory and silently overwrite each other's checkpoints and
+    logs, so that case raises and asks for a distinct label instead.
+
+    Returns a list of complete run dicts, each ready to splat into run_config(**run)
+    or run_path(**run).
+    """
+    resolved = []
+    seen = {}
+    for index, run in enumerate(runs):
+        unknown = set(run) - set(_RUN_DEFAULTS) - {'network'}
+        if unknown:
+            raise ValueError(
+                f'runs[{index}] has unknown key(s) {sorted(unknown)}; '
+                f'valid keys are {sorted(set(_RUN_DEFAULTS) | {"network"})}'
+            )
+        config = {**_RUN_DEFAULTS, **(defaults or {}), **run}
+        if not config.get('network'):
+            raise ValueError(f"runs[{index}] is missing the required 'network' key")
+        config['label'] = _run_name(config['network'], config['rl_method'], config['label'])
+
+        # Runs of different body lengths live under different task directories, so a
+        # label only has to be unique among runs sharing an n_links.
+        key = (config['n_links'], config['label'])
+        if key in seen:
+            raise ValueError(
+                f"runs[{index}] and runs[{seen[key]}] would both train into "
+                f"'{run_path(**config)}' and overwrite each other. Give at least one of "
+                f"them a distinct label=... (it also names the run in the plot legend)."
+            )
+        seen[key] = index
+        resolved.append(config)
+    return resolved
 
 
 def run_config(
@@ -72,6 +139,9 @@ def run_config(
     critic_sizes=(256, 256),
     action_noise=0.1,
     gradient_clip=0.5,
+    steps=int(1e5),
+    save_steps=int(5e4),
+    label=None,
 ):
     """Assemble the code strings train() needs for one (network, algorithm, body) choice.
 
@@ -93,8 +163,12 @@ def run_config(
                  step can blow the importance ratio up to inf and drive the weights to
                  NaN; capping the step keeps the ratio bounded. Applied to the critic
                  always, and to the actor except for TRPO (already trust-region bounded).
+    - steps/save_steps: total env steps to train for, and the checkpoint interval.
+    - label:     directory name for this run, and its label in the plot legend. Defaults
+                 to '<network>_<rl_method>'; required to tell apart runs that share both
+                 (see resolve_runs).
 
-    Returns (agent, environment, name), three strings ready to pass to train().
+    Returns (agent, environment, name, trainer), four strings ready to pass to train().
     """
     if rl_method not in _RL_AGENTS:
         raise ValueError(f"rl_method must be one of {sorted(_RL_AGENTS)}, got {rl_method!r}")
@@ -131,15 +205,20 @@ def run_config(
         )
     agent = f'tonic.torch.agents.{agent_cls}(' + ', '.join(agent_args) + ')'
     environment = f'tonic.environments.ControlSuite("swimmer-{task}"{time_feature})'
-    return agent, environment, _run_name(network, rl_method)
+    trainer = f'tonic.Trainer(steps={int(steps)}, save_steps={int(save_steps)})'
+    return agent, environment, _run_name(network, rl_method, label), trainer
 
 
-def run_path(network, rl_method='ppo', n_links=6):
-    """Data directory train() writes for this run -- pass to plot_performance / play_model."""
+def run_path(network, rl_method='ppo', n_links=6, label=None, **_run_config_kwargs):
+    """Data directory train() writes for this run -- pass to plot_performance / play_model.
+
+    Ignores the remaining run_config keys (sizes, budget, ...) so that a resolved run
+    dict can be splatted straight in: run_path(**run).
+    """
     if n_links not in _SWIM_TASKS:
         raise ValueError(f"n_links must be one of {sorted(_SWIM_TASKS)}, got {n_links!r}")
     task = _SWIM_TASKS[n_links]
-    return f'data/local/experiments/tonic/swimmer-{task}/{_run_name(network, rl_method)}'
+    return f'data/local/experiments/tonic/swimmer-{task}/{_run_name(network, rl_method, label)}'
 
 
 def train(
