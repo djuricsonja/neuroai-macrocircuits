@@ -17,6 +17,8 @@ from macrocircuits.constraints import (
     unsigned_uniform,
 )
 
+from macrocircuits.controllers import controllers_map
+
 
 class SwimmerModule(nn.Module):
     """C.-elegans-inspired neural circuit architectural prior."""
@@ -471,7 +473,7 @@ class SwimmerActor(nn.Module):
     ):
         super().__init__()
         self.swimmer = swimmer
-        self.controller = controller
+        self.controller = controllers_map(controller)
         self.distribution = distribution
         self.timestep_transform = timestep_transform
 
@@ -498,7 +500,7 @@ class SwimmerActor(nn.Module):
 
         # Generate high-level control signals.
         if self.controller:
-            right, left, speed = self.controller(observations)
+            right, left, speed = self.controller(observations, swimmer=self.swimmer)
         else:
             right, left, speed = None, None, None
 

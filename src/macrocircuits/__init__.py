@@ -18,13 +18,13 @@ tasks with the dm_control swimmer suite, so `suite.load('swimmer', 'swim')` reso
 tonic, which `ensure_tonic()` has to clone first.
 """
 
-from macrocircuits.envs import Swim, SwimToBall, render, test_dm_control
+from macrocircuits.envs import Swim, render, test_dm_control
 from macrocircuits.tonic_setup import ensure_tonic
 from macrocircuits.video import display_video, write_video
 
 __all__ = [
     'Swim',
-    'SwimToBall',
+    # 'SwimToBall',
     'display_video',
     'ensure_tonic',
     'render',

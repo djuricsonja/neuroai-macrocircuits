@@ -1,165 +1,183 @@
-"""Swimmer environments and the swim tasks the tutorial trains on.
-
-Importing this module registers `swim` and `swim_12_links` with the dm_control
-swimmer suite, which is what makes `suite.load('swimmer', 'swim')` resolve.
-"""
-
 import collections
 
 import dm_control.suite.swimmer as swimmer
 import numpy as np
 from dm_control.rl import control
 from dm_control.utils import rewards
+from lxml import etree
 
 from macrocircuits.video import display_video
 
 _SWIM_SPEED = 0.1
 
 
-class Swim(swimmer.Swimmer):
-    """Task to swim forwards at the desired speed."""
+def _add_obstacles(model_string, n_obstacles, radius=0.15):
+    """Adds n_obstacles static spherical obstacles to the swimmer MJCF."""
+    mjcf = etree.fromstring(model_string)
+    worldbody = mjcf.find('./worldbody')
+    for i in range(n_obstacles):
+        obstacle = etree.SubElement(worldbody, 'body', name=f'obstacle_{i}')
+        obstacle.set('pos', '0 0 0')  # randomized per-episode in initialize_episode
+        etree.SubElement(obstacle, 'geom', {
+            'name': f'obstacle_{i}',
+            'type': 'sphere',
+            'size': str(radius),
+            'rgba': '0.8 0.2 0.2 1',
+            'contype': '1',
+            'conaffinity': '1',
+        })
+    return etree.tostring(mjcf, pretty_print=True)
 
-    def __init__(self, desired_speed=_SWIM_SPEED, **kwargs):
+
+def get_model_and_assets(n_joints, n_obstacles=0):
+    model_string, assets = swimmer.get_model_and_assets(n_joints)
+    if n_obstacles > 0:
+        model_string = _add_obstacles(model_string, n_obstacles)
+    return model_string, assets
+
+
+class Physics(swimmer.Physics):
+    """Adds obstacle-awareness on top of the stock swimmer Physics."""
+
+    def nose_to_obstacles(self, n_obstacles):
+        """Head-local (x, y) vectors from nose to each obstacle, shape (n_obstacles, 2)."""
+        head_orientation = self.named.data.xmat['head'].reshape(3, 3)
+        nose_pos = self.named.data.geom_xpos['nose']
+        vectors = [
+            (self.named.data.geom_xpos[f'obstacle_{i}'] - nose_pos).dot(head_orientation)[:2]
+            for i in range(n_obstacles)
+        ]
+        return np.array(vectors)
+
+    def nearest_obstacle(self, n_obstacles):
+        """Head-local vector and distance to the closest obstacle."""
+        vectors = self.nose_to_obstacles(n_obstacles)
+        dists = np.linalg.norm(vectors, axis=-1)
+        idx = np.argmin(dists)
+        return vectors[idx], dists[idx]
+
+
+class Swim(swimmer.Swimmer):
+    """Swim forwards, with independently toggleable foraging and obstacle avoidance."""
+
+    def __init__(
+        self,
+        desired_speed=_SWIM_SPEED,
+        enable_single_target=False,
+        enable_foraging=False,
+        enable_obstacles=False,
+        n_obstacles=3,
+        target_reward_weight=1.0,
+        obstacle_penalty_weight=1.0,
+        obstacle_safe_distance=0.4,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self._desired_speed = desired_speed
+        self._enable_single_target = enable_single_target
+        self._enable_foraging = enable_foraging
+        self._enable_obstacles = enable_obstacles
+        self._n_obstacles = n_obstacles if enable_obstacles else 0
+        self._target_reward_weight = target_reward_weight
+        self._obstacle_penalty_weight = obstacle_penalty_weight
+        self._obstacle_safe_distance = obstacle_safe_distance
 
     def initialize_episode(self, physics):
-        super().initialize_episode(physics)
-        # Hide target by setting alpha to 0.
-        physics.named.model.mat_rgba['target', 'a'] = 0
-        physics.named.model.mat_rgba['target_default', 'a'] = 0
-        physics.named.model.mat_rgba['target_highlight', 'a'] = 0
+        if self._enable_foraging:
+            # Skip Swim's target-hiding step; call the grandparent (stock Swimmer)
+            # directly so the target is randomly placed AND stays visible.
+            super(Swim, self).initialize_episode(physics)
+        else:
+            super().initialize_episode(physics)
+            physics.named.model.mat_rgba['target', 'a'] = 0
+            physics.named.model.mat_rgba['target_default', 'a'] = 0
+            physics.named.model.mat_rgba['target_highlight', 'a'] = 0
+
+        if self._enable_obstacles:
+            for i in range(self._n_obstacles):
+                xpos, ypos = self.random.uniform(-1.5, 1.5, size=2)
+                physics.named.model.geom_pos[f'obstacle_{i}', 'x'] = xpos
+                physics.named.model.geom_pos[f'obstacle_{i}', 'y'] = ypos
 
     def get_observation(self, physics):
-        """Returns an observation of joint angles and body velocities."""
+        """joints, [to_target], [to_obstacle], body_velocities -- in that fixed order,
+        so slices stay predictable regardless of which flags are on."""
         obs = collections.OrderedDict()
         obs['joints'] = physics.joints()
+        if self._enable_foraging:
+            obs['to_target'] = physics.nose_to_target()
+        if self._enable_obstacles:
+            vector, _ = physics.nearest_obstacle(self._n_obstacles)
+            obs['to_obstacle'] = vector
         obs['body_velocities'] = physics.body_velocities()
         return obs
 
     def get_reward(self, physics):
-        """Returns a smooth reward that is 0 when stopped or moving backwards, and rises linearly to 1
-        when moving forwards at the desired speed."""
         forward_velocity = -physics.named.data.sensordata['head_vel'][1]
-        return rewards.tolerance(
+        reward = rewards.tolerance(
             forward_velocity,
             bounds=(self._desired_speed, float('inf')),
             margin=self._desired_speed,
             value_at_margin=0.,
             sigmoid='linear',
         )
-
-
-class SwimToBall(Swim):
-    """Swim forwards AND earn extra reward for reaching the ball (target).
-
-    Reuses `Swim`'s forward-velocity reward and re-enables the target ("ball") the
-    stock dm_control swimmer already provides but that `Swim` hides: the ball is left
-    visible, its head-local direction is exposed as a `to_target` observation, and a
-    distance-to-ball bonus is added on top of the forward reward.
-    """
-
-    def __init__(self, desired_speed=_SWIM_SPEED, target_reward_weight=1.0, **kwargs):
-        super().__init__(desired_speed=desired_speed, **kwargs)
-        self._target_reward_weight = target_reward_weight
-
-    def initialize_episode(self, physics):
-        # Skip Swim.initialize_episode (which hides the target); call the grandparent
-        # (dm_control Swimmer) directly so the ball is placed randomly AND stays visible.
-        super(Swim, self).initialize_episode(physics)
-
-    def get_observation(self, physics):
-        """Returns joints, the head-local vector to the ball, and body velocities.
-
-        `to_target` is inserted between `joints` and `body_velocities` on purpose: the
-        NCAP actor slices joints from the front and the time feature from the back, so
-        keeping joints first and body_velocities last leaves both slices valid.
-        """
-        obs = collections.OrderedDict()
-        obs['joints'] = physics.joints()
-        obs['to_target'] = physics.nose_to_target()
-        obs['body_velocities'] = physics.body_velocities()
-        return obs
-
-    def get_reward(self, physics):
-        """Returns the forward-swim reward plus a weighted bonus for nearing the ball."""
-        forward_reward = super().get_reward(physics)
-        # The ball's radius doubles as the success threshold (as in stock dm_control).
-        target_size = physics.named.model.geom_size['target', 0]
-        reach_reward = rewards.tolerance(
-            physics.nose_to_target_dist(),
-            bounds=(0, target_size),
-            margin=5 * target_size,
-            sigmoid='long_tail',
-        )
-        return forward_reward + self._target_reward_weight * reach_reward
+        if self._enable_single_target:
+            target_size = physics.named.model.geom_size['target', 0]
+            reward += rewards.tolerance(
+                physics.nose_to_target_dist(),
+                bounds=(0, target_size),
+                margin=5 * target_size,
+                sigmoid='long_tail',
+            )
+        if self._enable_foraging:
+            target_size = physics.named.model.geom_size['target', 0]
+            reward += self._target_reward_weight * rewards.tolerance(
+                physics.nose_to_target_dist(),
+                bounds=(0, target_size),
+                margin=5 * target_size,
+                sigmoid='long_tail',
+            )
+        if self._enable_obstacles:
+            _, dist = physics.nearest_obstacle(self._n_obstacles)
+            safety = rewards.tolerance(
+                dist,
+                bounds=(self._obstacle_safe_distance, float('inf')),
+                margin=self._obstacle_safe_distance,
+                value_at_margin=0.,
+                sigmoid='linear',
+            )
+            reward -= self._obstacle_penalty_weight * (1 - safety)
+        return reward
 
 
 @swimmer.SUITE.add()
 def swim(
     n_links=6,
     desired_speed=_SWIM_SPEED,
+    enable_single_target = False,
+    enable_foraging=False,
+    enable_obstacles=False,
+    n_obstacles=3,
     time_limit=swimmer._DEFAULT_TIME_LIMIT,
     random=None,
     environment_kwargs={},
 ):
-    """Returns the Swim task for a n-link swimmer."""
-    model_string, assets = swimmer.get_model_and_assets(n_links)
-    physics = swimmer.Physics.from_xml_string(model_string, assets=assets)
-    task = Swim(desired_speed=desired_speed, random=random)
-    return control.Environment(
-        physics,
-        task,
-        time_limit=time_limit,
-        control_timestep=swimmer._CONTROL_TIMESTEP,
-        **environment_kwargs,
+    """Returns the Swim task, with optional foraging and obstacle avoidance."""
+    model_string, assets = get_model_and_assets(
+        n_links, n_obstacles=n_obstacles if enable_obstacles else 0
     )
-
-
-@swimmer.SUITE.add()
-def swim_12_links(
-    n_links=12,
-    desired_speed=_SWIM_SPEED,
-    time_limit=swimmer._DEFAULT_TIME_LIMIT,
-    random=None,
-    environment_kwargs={},
-):
-    """Returns the Swim task for a n-link swimmer."""
-    model_string, assets = swimmer.get_model_and_assets(n_links)
-    physics = swimmer.Physics.from_xml_string(model_string, assets=assets)
-    task = Swim(desired_speed=desired_speed, random=random)
-    return control.Environment(
-        physics,
-        task,
-        time_limit=time_limit,
-        control_timestep=swimmer._CONTROL_TIMESTEP,
-        **environment_kwargs,
-    )
-
-
-@swimmer.SUITE.add()
-def swim_to_ball(
-    n_links=6,
-    desired_speed=_SWIM_SPEED,
-    target_reward_weight=1.0,
-    time_limit=swimmer._DEFAULT_TIME_LIMIT,
-    random=None,
-    environment_kwargs={},
-):
-    """Returns the SwimToBall task for a n-link swimmer."""
-    model_string, assets = swimmer.get_model_and_assets(n_links)
-    physics = swimmer.Physics.from_xml_string(model_string, assets=assets)
-    task = SwimToBall(
+    physics = Physics.from_xml_string(model_string, assets=assets)
+    task = Swim(
         desired_speed=desired_speed,
-        target_reward_weight=target_reward_weight,
+        enable_single_target=enable_single_target,
+        enable_foraging=enable_foraging,
+        enable_obstacles=enable_obstacles,
+        n_obstacles=n_obstacles,
         random=random,
     )
     return control.Environment(
-        physics,
-        task,
-        time_limit=time_limit,
-        control_timestep=swimmer._CONTROL_TIMESTEP,
-        **environment_kwargs,
+        physics, task, time_limit=time_limit,
+        control_timestep=swimmer._CONTROL_TIMESTEP, **environment_kwargs,
     )
 
 
