@@ -56,6 +56,7 @@ def ppo_swimmer_model(
     return models.ActorCritic(
         actor=SwimmerActor(
             swimmer=SwimmerModule(n_joints=n_joints, **swimmer_kwargs),
+            controller=swimmer_kwargs['controller'],
             distribution=lambda x: torch.distributions.normal.Normal(x, action_noise),
         ),
         critic=models.Critic(
@@ -74,7 +75,10 @@ def d4pg_swimmer_model(
     **swimmer_kwargs,
 ):
     return models.ActorCriticWithTargets(
-        actor=SwimmerActor(swimmer=SwimmerModule(n_joints=n_joints, **swimmer_kwargs),),
+        actor=SwimmerActor(
+            swimmer=SwimmerModule(n_joints=n_joints, **swimmer_kwargs), 
+            controller=swimmer_kwargs['controller'],
+        ),
         critic=models.Critic(
             encoder=models.ObservationActionEncoder(),
             torso=models.MLP(critic_sizes, critic_activation),
@@ -95,6 +99,7 @@ def ppo_per_joint_oscillator_model(
     return models.ActorCritic(
         actor=SwimmerActor(
             swimmer=PerJointOscillator_SwimmerModule(n_joints=n_joints, **swimmer_kwargs),
+            controller=swimmer_kwargs['controller'],
             distribution=lambda x: torch.distributions.normal.Normal(x, action_noise),
         ),
         critic=models.Critic(

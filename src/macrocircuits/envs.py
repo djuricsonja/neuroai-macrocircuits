@@ -83,7 +83,7 @@ class Swim(swimmer.Swimmer):
         self._obstacle_safe_distance = obstacle_safe_distance
 
     def initialize_episode(self, physics):
-        if self._enable_foraging:
+        if self._enable_foraging or self._enable_single_target:
             # Skip Swim's target-hiding step; call the grandparent (stock Swimmer)
             # directly so the target is randomly placed AND stays visible.
             super(Swim, self).initialize_episode(physics)
@@ -104,7 +104,7 @@ class Swim(swimmer.Swimmer):
         so slices stay predictable regardless of which flags are on."""
         obs = collections.OrderedDict()
         obs['joints'] = physics.joints()
-        if self._enable_foraging:
+        if self._enable_foraging or self._enable_single_target:
             obs['to_target'] = physics.nose_to_target()
         if self._enable_obstacles:
             vector, _ = physics.nearest_obstacle(self._n_obstacles)
@@ -157,6 +157,99 @@ def swim(
     enable_single_target = False,
     enable_foraging=False,
     enable_obstacles=False,
+    n_obstacles=3,
+    time_limit=swimmer._DEFAULT_TIME_LIMIT,
+    random=None,
+    environment_kwargs={},
+):
+    """Returns the Swim task, with optional foraging and obstacle avoidance."""
+    model_string, assets = get_model_and_assets(
+        n_links, n_obstacles=n_obstacles if enable_obstacles else 0
+    )
+    physics = Physics.from_xml_string(model_string, assets=assets)
+    task = Swim(
+        desired_speed=desired_speed,
+        enable_single_target=enable_single_target,
+        enable_foraging=enable_foraging,
+        enable_obstacles=enable_obstacles,
+        n_obstacles=n_obstacles,
+        random=random,
+    )
+    return control.Environment(
+        physics, task, time_limit=time_limit,
+        control_timestep=swimmer._CONTROL_TIMESTEP, **environment_kwargs,
+    )
+
+
+@swimmer.SUITE.add()
+def swim_to_ball(
+    n_links=6,
+    desired_speed=_SWIM_SPEED,
+    enable_single_target = True,
+    enable_foraging=False,
+    enable_obstacles=False,
+    n_obstacles=3,
+    time_limit=swimmer._DEFAULT_TIME_LIMIT,
+    random=None,
+    environment_kwargs={},
+):
+    """Returns the Swim task, with optional foraging and obstacle avoidance."""
+    model_string, assets = get_model_and_assets(
+        n_links, n_obstacles=n_obstacles if enable_obstacles else 0
+    )
+    physics = Physics.from_xml_string(model_string, assets=assets)
+    task = Swim(
+        desired_speed=desired_speed,
+        enable_single_target=enable_single_target,
+        enable_foraging=enable_foraging,
+        enable_obstacles=enable_obstacles,
+        n_obstacles=n_obstacles,
+        random=random,
+    )
+    return control.Environment(
+        physics, task, time_limit=time_limit,
+        control_timestep=swimmer._CONTROL_TIMESTEP, **environment_kwargs,
+    )
+
+
+@swimmer.SUITE.add()
+def foraging(
+    n_links=6,
+    desired_speed=_SWIM_SPEED,
+    enable_single_target = False,
+    enable_foraging=True,
+    enable_obstacles=False,
+    n_obstacles=3,
+    time_limit=swimmer._DEFAULT_TIME_LIMIT,
+    random=None,
+    environment_kwargs={},
+):
+    """Returns the Swim task, with optional foraging and obstacle avoidance."""
+    model_string, assets = get_model_and_assets(
+        n_links, n_obstacles=n_obstacles if enable_obstacles else 0
+    )
+    physics = Physics.from_xml_string(model_string, assets=assets)
+    task = Swim(
+        desired_speed=desired_speed,
+        enable_single_target=enable_single_target,
+        enable_foraging=enable_foraging,
+        enable_obstacles=enable_obstacles,
+        n_obstacles=n_obstacles,
+        random=random,
+    )
+    return control.Environment(
+        physics, task, time_limit=time_limit,
+        control_timestep=swimmer._CONTROL_TIMESTEP, **environment_kwargs,
+    )
+
+
+@swimmer.SUITE.add()
+def evasion(
+    n_links=6,
+    desired_speed=_SWIM_SPEED,
+    enable_single_target = False,
+    enable_foraging=False,
+    enable_obstacles=True,
     n_obstacles=3,
     time_limit=swimmer._DEFAULT_TIME_LIMIT,
     random=None,

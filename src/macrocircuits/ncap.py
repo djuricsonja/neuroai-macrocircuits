@@ -35,6 +35,7 @@ class SwimmerModule(nn.Module):
             include_head_oscillators: bool = True,
             include_speed_control: bool = False,
             include_turn_control: bool = False,
+            controller: str = None
     ):
         super().__init__()
         self.n_joints = n_joints
@@ -259,6 +260,7 @@ class PerJointOscillator_SwimmerModule(nn.Module):
             include_head_oscillators: bool = True,
             include_speed_control: bool = False,
             include_turn_control: bool = False,
+            controller: str = None
     ):
         super().__init__()
         self.n_joints = n_joints
