@@ -22,3 +22,6 @@ Thumbs.db
 
 # Claude related files
 CLAUDE.md
+
+# Training runs and logs
+Ressources/data/

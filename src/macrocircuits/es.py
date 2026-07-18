@@ -323,14 +323,58 @@ def es_run_path(network, n_links=6, name=None, data_dir=None):
     """Directory an ES run writes to -- pass to plot_performance / for checkpoints.
 
     Parallels `training.run_path` but under an `es/` tree rather than `tonic/`, so RL
-    and ES curves can be handed to `plot_performance` together.
+    and ES curves can be handed to `plot_performance` together. Joined with '/' rather
+    than os.sep to match run_path, which the notebook prints these next to; forward
+    slashes are valid paths on Windows too.
     """
     if n_links not in _SWIM_TASKS:
         raise ValueError(f"n_links must be one of {sorted(_SWIM_TASKS)}, got {n_links!r}")
     task = _SWIM_TASKS[n_links]
     name = name or f'{network}_es'
-    base = data_dir or os.path.join('data', 'local', 'experiments', 'es')
-    return os.path.join(base, f'swimmer-{task}', name)
+    base = data_dir or 'data/local/experiments/es'
+    return '/'.join((base, f'swimmer-{task}', name))
+
+
+def es_config(
+    network,
+    n_links=6,
+    generations=100,
+    population_size=64,
+    sigma=0.02,
+    lr=0.02,
+    weight_decay=0.0,
+    n_evals=1,
+    hidden_sizes=(64, 64),
+    seed=0,
+    swimmer_kwargs=None,
+    label=None,
+    **_rl_kwargs,
+):
+    """Map a resolved run dict onto run_es()'s keyword arguments.
+
+    The ES counterpart of `training.run_config`: a run declared in the notebook is
+    splatted in (`run_es(**es_config(**run))`) and the RL-only keys it also carries --
+    critic_sizes, gradient_clip, steps, ... -- are ignored here, exactly as run_config
+    ignores the ES-only ones.
+
+    Two names differ from run_es()'s own: `generations` is its `n_steps` (ES counts
+    generations, not environment steps, so reusing the RL `steps` key would mislead),
+    and `label` is its `name`, so the run lands in the directory run_path() predicts.
+    """
+    return dict(
+        network=network,
+        n_links=n_links,
+        n_steps=generations,
+        population_size=population_size,
+        sigma=sigma,
+        lr=lr,
+        weight_decay=weight_decay,
+        n_evals=n_evals,
+        hidden_sizes=hidden_sizes,
+        seed=seed,
+        swimmer_kwargs=swimmer_kwargs,
+        name=label,
+    )
 
 
 def make_es_policy(network, agent, hidden_sizes=(64, 64), swimmer_kwargs=None):
@@ -444,9 +488,62 @@ def run_es(
             'weight_decay': weight_decay,
             'task': task,
             'best_reward': es.best_reward,
+            # Saved so play_es_model() can rebuild the exact policy it trained.
+            'swimmer_kwargs': dict(swimmer_kwargs or {}),
         }
         _save_es_run(es_run_path(network, n_links, name=name, data_dir=data_dir), es, config)
     return es
+
+
+def play_es_model(path, camera_id=0, width=640, height=480, fps=60):
+    """Replay an ES run's best policy and render it -- the ES twin of `training.play_model`.
+
+    An ES checkpoint is a bare policy state_dict, not a tonic agent checkpoint, so
+    tonic's player cannot load it. This rebuilds the policy from the run's config.yaml,
+    rolls out one deterministic episode, and returns the rendered video.
+
+    Args:
+      path: an ES run directory, as returned by `es_run_path` / `training.run_path`.
+
+    Returns:
+      An IPython HTML video element, like `training.play_model`.
+    """
+    from macrocircuits.video import display_video
+
+    with open(os.path.join(path, 'config.yaml')) as config_file:
+        config = yaml.safe_load(config_file)
+
+    agent = SwimmerESAgent(task=config['task'], n_evals=1, seed=config.get('seed', 0))
+    policy = make_es_policy(
+        config['network'],
+        agent,
+        hidden_sizes=tuple(config.get('hidden_sizes') or (64, 64)),
+        swimmer_kwargs=config.get('swimmer_kwargs'),
+    )
+    checkpoint = os.path.join(path, 'checkpoints', 'best.pt')
+    policy.load_state_dict(torch.load(checkpoint, map_location='cpu'))
+    policy.eval()
+
+    # The rollout is SwimmerESAgent.rollout's, with a rendered frame per step; it is
+    # repeated here rather than folded into that method to keep the scoring path -- run
+    # once per candidate per generation -- free of rendering.
+    frames = []
+    total_reward = 0.0
+    timestep = agent.env.reset()
+    policy.reset()
+    with torch.no_grad():
+        while not timestep.last():
+            frames.append(agent.env.physics.render(camera_id=camera_id, width=width, height=height))
+            observation = torch.as_tensor(
+                _flatten_observation(timestep.observation), dtype=torch.float32
+            )
+            action = np.clip(policy(observation).cpu().numpy(), -1.0, 1.0)
+            timestep = agent.env.step(action)
+            if timestep.reward is not None:
+                total_reward += float(timestep.reward)
+
+    print(f'Loaded {checkpoint} -- episode score {total_reward:.2f}')
+    return display_video(frames, fps=fps)
 
 
 __all__ = [
@@ -454,8 +551,10 @@ __all__ = [
     'MLPSwimmerPolicy',
     'NCAPSwimmerPolicy',
     'SwimmerESAgent',
+    'es_config',
     'es_run_path',
     'make_es_policy',
+    'play_es_model',
     'rank_transformation',
     'run_es',
 ]

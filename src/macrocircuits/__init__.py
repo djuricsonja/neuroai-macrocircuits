@@ -21,7 +21,13 @@ dm_control), so its entry points are re-exported below.
 """
 
 from macrocircuits.envs import Swim, SwimToBall, render, test_dm_control
-from macrocircuits.es import EvolutionStrategy, run_es, es_run_path
+from macrocircuits.es import (
+    EvolutionStrategy,
+    es_config,
+    es_run_path,
+    play_es_model,
+    run_es,
+)
 from macrocircuits.tonic_setup import ensure_tonic
 from macrocircuits.video import display_video, write_video
 
@@ -31,7 +37,9 @@ __all__ = [
     'SwimToBall',
     'display_video',
     'ensure_tonic',
+    'es_config',
     'es_run_path',
+    'play_es_model',
     'render',
     'run_es',
     'test_dm_control',
