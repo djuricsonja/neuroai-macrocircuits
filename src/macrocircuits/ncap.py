@@ -475,7 +475,7 @@ class SwimmerActor(nn.Module):
     ):
         super().__init__()
         self.swimmer = swimmer
-        self.controller = controllers_map(controller)
+        self.controller = controllers_map(controller, n_joints=swimmer.n_joints)
         self.distribution = distribution
         self.timestep_transform = timestep_transform
 
