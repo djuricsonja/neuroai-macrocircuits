@@ -70,6 +70,7 @@ class Swim(swimmer.Swimmer):
         target_reward_weight=1.0,
         obstacle_penalty_weight=1.0,
         obstacle_safe_distance=0.4,
+        food_size=0.02,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -81,12 +82,15 @@ class Swim(swimmer.Swimmer):
         self._target_reward_weight = target_reward_weight
         self._obstacle_penalty_weight = obstacle_penalty_weight
         self._obstacle_safe_distance = obstacle_safe_distance
+        self._food_size = food_size
 
     def initialize_episode(self, physics):
         if self._enable_foraging or self._enable_single_target:
             # Skip Swim's target-hiding step; call the grandparent (stock Swimmer)
             # directly so the target is randomly placed AND stays visible.
             super(Swim, self).initialize_episode(physics)
+            if self._enable_foraging:
+                physics.named.model.geom_size['target', 0] = self._food_size
         else:
             super().initialize_episode(physics)
             physics.named.model.mat_rgba['target', 'a'] = 0
