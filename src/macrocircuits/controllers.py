@@ -59,9 +59,9 @@ def controllers_map(controller_name, n_joints=None, hidden_size=16):
             return None
     
     name = controller_name.upper()
-    if name in ['FORAGE', 'FORAGING', 'AVOID', 'AVOIDANCE', 'OBSTACLE']:
+    if name in ['FORAGE', 'FORAGING', 'AVOID', 'AVOIDANCE', 'OBSTACLE', 'EVASION']:
         return MLP_controller(n_joints=n_joints, input_size=2, hidden_size=hidden_size)
-    elif name in ['FORAGE_AVOID', 'FORAGING_AVOIDANCE']:
+    elif name in ['FORAGE_AVOID', 'FORAGING_AVOIDANCE', 'FORAGING_EVASION']:
         return MLP_controller(n_joints=n_joints, input_size=4, hidden_size=hidden_size)
     else:
         return None

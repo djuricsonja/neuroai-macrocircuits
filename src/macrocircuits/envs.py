@@ -11,13 +11,37 @@ from macrocircuits.video import display_video
 _SWIM_SPEED = 0.1
 
 
-def _add_obstacles(model_string, n_obstacles, radius=0.15):
-    """Adds n_obstacles static spherical obstacles to the swimmer MJCF."""
+def _add_obstacles(
+    model_string,
+    n_obstacles,
+    radius=0.05,
+    min_distance_from_origin=0.2,
+    max_distance_from_origin=0.6,
+    min_obstacle_separation=0.5,
+):
+    """Adds n_obstacles static spherical obstacles to the swimmer MJCF, at
+    random non-overlapping positions surrounding the origin (the worm's
+    start point). Positions are fixed at construction time -- see note
+    below if you also want per-episode re-randomization."""
     mjcf = etree.fromstring(model_string)
     worldbody = mjcf.find('./worldbody')
+
+    placed = []
     for i in range(n_obstacles):
+        for _ in range(50):  # rejection sampling attempts
+            angle = np.random.uniform(0, 2 * np.pi)
+            dist = np.random.uniform(min_distance_from_origin, max_distance_from_origin)
+            xpos = dist * np.cos(angle)
+            ypos = dist * np.sin(angle)
+            if all(
+                np.hypot(xpos - px, ypos - py) >= min_obstacle_separation
+                for px, py in placed
+            ):
+                break  # found a non-overlapping spot
+        placed.append((xpos, ypos))
+
         obstacle = etree.SubElement(worldbody, 'body', name=f'obstacle_{i}')
-        obstacle.set('pos', '0 0 0')  # randomized per-episode in initialize_episode
+        obstacle.set('pos', f'{xpos} {ypos} 0.05')
         etree.SubElement(obstacle, 'geom', {
             'name': f'obstacle_{i}',
             'type': 'sphere',
@@ -70,6 +94,7 @@ class Swim(swimmer.Swimmer):
         target_reward_weight=1.0,
         obstacle_penalty_weight=1.0,
         obstacle_safe_distance=0.4,
+        obstacle_min_distance=0.5,
         food_size=0.02,
         **kwargs,
     ):
@@ -82,6 +107,7 @@ class Swim(swimmer.Swimmer):
         self._target_reward_weight = target_reward_weight
         self._obstacle_penalty_weight = obstacle_penalty_weight
         self._obstacle_safe_distance = obstacle_safe_distance
+        self._obstacle_min_distance = obstacle_min_distance
         self._food_size = food_size
 
     def initialize_episode(self, physics):
@@ -97,11 +123,10 @@ class Swim(swimmer.Swimmer):
             physics.named.model.mat_rgba['target_default', 'a'] = 0
             physics.named.model.mat_rgba['target_highlight', 'a'] = 0
 
-        if self._enable_obstacles:
-            for i in range(self._n_obstacles):
-                xpos, ypos = self.random.uniform(-1.5, 1.5, size=2)
-                physics.named.model.geom_pos[f'obstacle_{i}', 'x'] = xpos
-                physics.named.model.geom_pos[f'obstacle_{i}', 'y'] = ypos
+    def all_body_positions(self, physics):
+        """World (x, y, z) position of every body in the model, including the head."""
+        names = physics.named.data.xpos.axes.row.names
+        return names, physics.named.data.xpos[:]
 
     def get_observation(self, physics):
         """joints, [to_target], [to_obstacle], body_velocities -- in that fixed order,
@@ -125,6 +150,7 @@ class Swim(swimmer.Swimmer):
             value_at_margin=0.,
             sigmoid='linear',
         )
+
         if self._enable_single_target:
             target_size = physics.named.model.geom_size['target', 0]
             reward += rewards.tolerance(
@@ -133,16 +159,28 @@ class Swim(swimmer.Swimmer):
                 margin=5 * target_size,
                 sigmoid='long_tail',
             )
+
         if self._enable_foraging:
             target_size = physics.named.model.geom_size['target', 0]
+            dist = physics.nose_to_target_dist()
             reward += self._target_reward_weight * rewards.tolerance(
-                physics.nose_to_target_dist(),
+                dist,
                 bounds=(0, target_size),
                 margin=5 * target_size,
                 sigmoid='long_tail',
             )
+            if dist < target_size:  # worm reached the food -- respawn it
+                xpos, ypos = self.random.uniform(-1.5, 1.5, size=2)
+                physics.named.model.geom_pos['target', 'x'] = xpos
+                physics.named.model.geom_pos['target', 'y'] = ypos
+
         if self._enable_obstacles:
             _, dist = physics.nearest_obstacle(self._n_obstacles)
+
+            # # --- temporary contact diagnostic ---
+            # print(f'nearest obstacle dist={dist:.4f}')   # <-- add this
+            # # --- end diagnostic ---
+
             safety = rewards.tolerance(
                 dist,
                 bounds=(self._obstacle_safe_distance, float('inf')),
@@ -151,6 +189,16 @@ class Swim(swimmer.Swimmer):
                 sigmoid='linear',
             )
             reward -= self._obstacle_penalty_weight * (1 - safety)
+
+            # # --- temporary contact diagnostic ---
+            # if physics.data.ncon > 0:
+            #     for i in range(physics.data.ncon):
+            #         c = physics.data.contact[i]
+            #         g1 = physics.model.id2name(c.geom1, 'geom')
+            #         g2 = physics.model.id2name(c.geom2, 'geom')
+            #         print(f'CONTACT: {g1} <-> {g2}, dist={c.dist:.4f}')
+            # # --- end diagnostic ---
+
         return reward
 
 
