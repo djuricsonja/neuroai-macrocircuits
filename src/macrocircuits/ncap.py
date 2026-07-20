@@ -488,6 +488,7 @@ class SwimmerActor(nn.Module):
         self.action_size = action_space.shape[0]
 
     def forward(self, observations):
+        # print(f"SimmerActor observations: {observations}")
         joint_pos = observations[..., :self.action_size]
         timesteps = observations[..., -1, None]
 

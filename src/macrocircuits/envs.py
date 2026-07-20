@@ -152,10 +152,20 @@ class Swim(swimmer.Swimmer):
             physics.named.model.mat_rgba['target_default', 'a'] = 0
             physics.named.model.mat_rgba['target_highlight', 'a'] = 0
 
+        # print(f"All Body Psotions: {self.all_body_positions(physics)}")
+        # print(f"Observation: {self.get_observation(physics)}")
+
     def all_body_positions(self, physics):
         """World (x, y, z) position of every body in the model, including the head."""
         names = physics.named.data.xpos.axes.row.names
         return names, physics.named.data.xpos[:]
+    
+    # def worm_positions(physics, n_joints, head_name):
+    #     """World (x, y, z) position of just the worm's own segments, excluding
+    #     world/target/obstacle bodies. head_name must be confirmed from
+    #     all_body_positions' printed names first (e.g. 'head')."""
+    #     names = [head_name] + [f'segment_{i}' for i in range(n_joints)]
+    #     return np.array([physics.named.data.xpos[n] for n in names])
 
     def get_observation(self, physics):
         """joints, [to_target], [to_obstacle], body_velocities -- in that fixed order,
