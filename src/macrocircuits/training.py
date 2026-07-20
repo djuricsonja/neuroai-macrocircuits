@@ -344,6 +344,35 @@ def run_path(network, method='ppo', n_links=6, label=None, **_run_config_kwargs)
     return f'data/local/experiments/tonic/swimmer-{task}/{name}'
 
 
+def is_trained(path, agent, environment, trainer, seed=0):
+    """True if `path` already holds a checkpointed run with these exact settings.
+
+    Compares the agent/environment/trainer code strings (and seed) that `train()`
+    would record in config.yaml against what is already saved there, so a changed
+    parameter -- steps, sizes, action_noise, swimmer_kwargs, ... -- is retrained even
+    though the run's label (and so its directory, from run_path) is unchanged. Also
+    requires at least one checkpoint, so a run interrupted before its first save is
+    retrained rather than treated as done.
+
+    Pass it the exact (agent, environment, trainer) strings run_config() returns for
+    the run being considered; call before train() and skip the call if it returns True.
+    """
+    config_path = os.path.join(path, 'config.yaml')
+    checkpoints_path = os.path.join(path, 'checkpoints')
+    if not os.path.isfile(config_path) or not os.path.isdir(checkpoints_path):
+        return False
+    if not any(name.startswith('step_') for name in os.listdir(checkpoints_path)):
+        return False
+    with open(config_path, 'r') as config_file:
+        saved = yaml.load(config_file, Loader=yaml.FullLoader) or {}
+    return (
+        saved.get('agent') == agent
+        and saved.get('environment') == environment
+        and saved.get('trainer') == trainer
+        and saved.get('seed') == seed
+    )
+
+
 def train(
     header,
     agent,

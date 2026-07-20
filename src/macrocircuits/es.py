@@ -377,6 +377,52 @@ def es_config(
     )
 
 
+def is_es_trained(
+    path,
+    network,
+    n_links=6,
+    population_size=64,
+    sigma=0.02,
+    lr=0.02,
+    n_steps=100,
+    n_evals=1,
+    seed=0,
+    hidden_sizes=(64, 64),
+    weight_decay=0.0,
+    swimmer_kwargs=None,
+    **_run_es_kwargs,
+):
+    """True if `path` already holds an ES run with these exact hyperparameters.
+
+    The ES counterpart of `training.is_trained`: compares the hyperparameters
+    `run_es` would save in config.yaml (see `_save_es_run`) against what's already
+    there, so a changed population_size, sigma, hidden_sizes, ... is retrained even
+    though the run's label (and so its directory) is unchanged. Also requires the
+    best-policy checkpoint to exist. **_run_es_kwargs absorbs the extra keys
+    `es_config` returns (name, data_dir) that aren't saved hyperparameters, so this
+    can be called as `is_es_trained(path, **es_config(**run))`.
+    """
+    config_path = os.path.join(path, 'config.yaml')
+    checkpoint_path = os.path.join(path, 'checkpoints', 'best.pt')
+    if not os.path.isfile(config_path) or not os.path.isfile(checkpoint_path):
+        return False
+    with open(config_path, 'r') as config_file:
+        saved = yaml.safe_load(config_file) or {}
+    return (
+        saved.get('network') == network
+        and saved.get('n_links') == n_links
+        and saved.get('population_size') == population_size
+        and saved.get('sigma') == sigma
+        and saved.get('lr') == lr
+        and saved.get('n_steps') == n_steps
+        and saved.get('n_evals') == n_evals
+        and saved.get('seed') == seed
+        and saved.get('hidden_sizes') == list(hidden_sizes)
+        and saved.get('weight_decay') == weight_decay
+        and saved.get('swimmer_kwargs') == dict(swimmer_kwargs or {})
+    )
+
+
 def make_es_policy(network, agent, hidden_sizes=(64, 64), swimmer_kwargs=None):
     """Build the ES policy for `network` ('ncap' or 'mlp'), sized from `agent`."""
     if network == 'ncap':
@@ -553,6 +599,7 @@ __all__ = [
     'SwimmerESAgent',
     'es_config',
     'es_run_path',
+    'is_es_trained',
     'make_es_policy',
     'play_es_model',
     'rank_transformation',
