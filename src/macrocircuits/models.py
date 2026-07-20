@@ -51,11 +51,13 @@ def ppo_swimmer_model(
     action_noise=0.1,
     critic_sizes=(64, 64),
     critic_activation=nn.Tanh,
+    controller=None,
     **swimmer_kwargs,
 ):
     return models.ActorCritic(
         actor=SwimmerActor(
-            swimmer=SwimmerModule(n_joints=n_joints, **swimmer_kwargs),
+            swimmer=SwimmerModule(n_joints=n_joints, include_turn_control=(controller is not None), **swimmer_kwargs),
+            controller=controller,
             distribution=lambda x: torch.distributions.normal.Normal(x, action_noise),
         ),
         critic=models.Critic(
