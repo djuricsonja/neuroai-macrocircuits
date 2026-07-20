@@ -41,6 +41,10 @@ def write_video(
     None. The video is written to the specified filepath.
     """
 
+    directory = os.path.dirname(filepath)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+
     with imageio.get_writer(
         filepath,
         fps=fps,
