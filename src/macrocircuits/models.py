@@ -7,7 +7,7 @@ import torch
 from torch import nn
 from tonic.torch import models, normalizers
 
-from macrocircuits.ncap import SwimmerActor, SwimmerModule, PerJointOscillator_SwimmerModule
+from macrocircuits.ncap import SwimmerActor, SwimmerModule
 
 
 def ppo_mlp_model(
@@ -84,28 +84,6 @@ def d4pg_swimmer_model(
             torso=models.MLP(critic_sizes, critic_activation),
             # These values are for the control suite with 0.99 discount.
             head=models.DistributionalValueHead(-150., 150., 51),
-        ),
-        observation_normalizer=normalizers.MeanStd(),
-    )
-
-
-def ppo_per_joint_oscillator_model(
-    n_joints=5,
-    action_noise=0.1,
-    critic_sizes=(64, 64),
-    critic_activation=nn.Tanh,
-    **swimmer_kwargs,
-):
-    return models.ActorCritic(
-        actor=SwimmerActor(
-            swimmer=PerJointOscillator_SwimmerModule(n_joints=n_joints, **swimmer_kwargs),
-            controller=swimmer_kwargs['controller'],
-            distribution=lambda x: torch.distributions.normal.Normal(x, action_noise),
-        ),
-        critic=models.Critic(
-            encoder=models.ObservationEncoder(),
-            torso=models.MLP(critic_sizes, critic_activation),
-            head=models.ValueHead(),
         ),
         observation_normalizer=normalizers.MeanStd(),
     )
