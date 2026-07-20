@@ -16,7 +16,7 @@ from macrocircuits.video import display_video
 
 # Imported so that the code strings passed to train() and stored in config.yaml --
 # e.g. 'tonic.torch.agents.PPO(model=ppo_mlp_model(...))' -- resolve when eval'd.
-from macrocircuits.models import d4pg_swimmer_model, ppo_mlp_model, ppo_swimmer_model, ppo_per_joint_oscillator_model
+from macrocircuits.models import d4pg_swimmer_model, ppo_mlp_model, ppo_swimmer_model
 
 
 def _eval_namespace():
