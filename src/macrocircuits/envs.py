@@ -7,6 +7,7 @@ from dm_control.utils import rewards
 from lxml import etree
 
 from macrocircuits.video import display_video
+import mujoco
 
 _SWIM_SPEED = 0.1
 
@@ -49,6 +50,7 @@ def _add_obstacles(
             'rgba': '0.8 0.2 0.2 1',
             'contype': '1',
             'conaffinity': '1',
+            'margin': '0.02'
         })
     return etree.tostring(mjcf, pretty_print=True)
 
@@ -60,21 +62,45 @@ def get_model_and_assets(n_joints, n_obstacles=0):
     return model_string, assets
 
 
+# class Physics(swimmer.Physics):
+#     """Adds obstacle-awareness on top of the stock swimmer Physics."""
+
+#     def nose_to_obstacles(self, n_obstacles):
+#         """Head-local (x, y) vectors from nose to each obstacle, shape (n_obstacles, 2)."""
+#         head_orientation = self.named.data.xmat['head'].reshape(3, 3)
+#         nose_pos = self.named.data.geom_xpos['nose']
+#         vectors = [
+#             (self.named.data.geom_xpos[f'obstacle_{i}'] - nose_pos).dot(head_orientation)[:2]
+#             for i in range(n_obstacles)
+#         ]
+#         return np.array(vectors)
+
+#     def nearest_obstacle(self, n_obstacles):
+#         """Head-local vector and distance to the closest obstacle."""
+#         vectors = self.nose_to_obstacles(n_obstacles)
+#         dists = np.linalg.norm(vectors, axis=-1)
+#         idx = np.argmin(dists)
+#         return vectors[idx], dists[idx]
+
+
 class Physics(swimmer.Physics):
-    """Adds obstacle-awareness on top of the stock swimmer Physics."""
+    def _body_geom_names(self):
+        return [n for n in self.named.data.geom_xpos.axes.row.names if n.startswith('visual')]
 
     def nose_to_obstacles(self, n_obstacles):
-        """Head-local (x, y) vectors from nose to each obstacle, shape (n_obstacles, 2)."""
+        """Head-local (x, y) vector + true min distance from the whole body to each obstacle."""
         head_orientation = self.named.data.xmat['head'].reshape(3, 3)
-        nose_pos = self.named.data.geom_xpos['nose']
-        vectors = [
-            (self.named.data.geom_xpos[f'obstacle_{i}'] - nose_pos).dot(head_orientation)[:2]
-            for i in range(n_obstacles)
-        ]
+        body_geoms = self._body_geom_names()
+        vectors = []
+        for i in range(n_obstacles):
+            obs_pos = self.named.data.geom_xpos[f'obstacle_{i}']
+            dists = [np.linalg.norm(self.named.data.geom_xpos[g] - obs_pos) for g in body_geoms]
+            closest_geom = body_geoms[int(np.argmin(dists))]
+            local_vec = (obs_pos - self.named.data.geom_xpos[closest_geom]).dot(head_orientation)[:2]
+            vectors.append(local_vec)
         return np.array(vectors)
 
     def nearest_obstacle(self, n_obstacles):
-        """Head-local vector and distance to the closest obstacle."""
         vectors = self.nose_to_obstacles(n_obstacles)
         dists = np.linalg.norm(vectors, axis=-1)
         idx = np.argmin(dists)
@@ -111,6 +137,9 @@ class Swim(swimmer.Swimmer):
         self._food_size = food_size
 
     def initialize_episode(self, physics):
+        # disabled = bool(physics.model.opt.disableflags & mujoco.mjtDisableBit.mjDSBL_CONTACT)
+        # print('contact globally disabled:', disabled)
+
         if self._enable_foraging or self._enable_single_target:
             # Skip Swim's target-hiding step; call the grandparent (stock Swimmer)
             # directly so the target is randomly placed AND stays visible.
@@ -176,11 +205,6 @@ class Swim(swimmer.Swimmer):
 
         if self._enable_obstacles:
             _, dist = physics.nearest_obstacle(self._n_obstacles)
-
-            # # --- temporary contact diagnostic ---
-            # print(f'nearest obstacle dist={dist:.4f}')   # <-- add this
-            # # --- end diagnostic ---
-
             safety = rewards.tolerance(
                 dist,
                 bounds=(self._obstacle_safe_distance, float('inf')),
@@ -189,15 +213,6 @@ class Swim(swimmer.Swimmer):
                 sigmoid='linear',
             )
             reward -= self._obstacle_penalty_weight * (1 - safety)
-
-            # # --- temporary contact diagnostic ---
-            # if physics.data.ncon > 0:
-            #     for i in range(physics.data.ncon):
-            #         c = physics.data.contact[i]
-            #         g1 = physics.model.id2name(c.geom1, 'geom')
-            #         g2 = physics.model.id2name(c.geom2, 'geom')
-            #         print(f'CONTACT: {g1} <-> {g2}, dist={c.dist:.4f}')
-            # # --- end diagnostic ---
 
         return reward
 
@@ -312,6 +327,8 @@ def evasion(
         n_links, n_obstacles=n_obstacles if enable_obstacles else 0
     )
     physics = Physics.from_xml_string(model_string, assets=assets)
+    # physics.model.opt.disableflags &= ~int(mujoco.mjtDisableBit.mjDSBL_CONTACT)
+    physics.model.opt.disableflags = 0
     task = Swim(
         desired_speed=desired_speed,
         enable_single_target=enable_single_target,
