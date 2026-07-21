@@ -17,6 +17,8 @@ from macrocircuits.constraints import (
     unsigned_uniform,
 )
 
+from macrocircuits.controllers import controllers_map
+
 
 class SwimmerModule(nn.Module):
     """C.-elegans-inspired neural circuit architectural prior."""
@@ -33,6 +35,7 @@ class SwimmerModule(nn.Module):
             include_head_oscillators: bool = True,
             include_speed_control: bool = False,
             include_turn_control: bool = False,
+            controller: str = None
     ):
         super().__init__()
         self.n_joints = n_joints
@@ -253,7 +256,7 @@ class SwimmerActor(nn.Module):
     ):
         super().__init__()
         self.swimmer = swimmer
-        self.controller = controller
+        self.controller = controllers_map(controller, n_joints=swimmer.n_joints)
         self.distribution = distribution
         self.timestep_transform = timestep_transform
 
@@ -266,6 +269,7 @@ class SwimmerActor(nn.Module):
         self.action_size = action_space.shape[0]
 
     def forward(self, observations):
+        # print(f"SimmerActor observations: {observations}")
         joint_pos = observations[..., :self.action_size]
         timesteps = observations[..., -1, None]
 
@@ -280,7 +284,7 @@ class SwimmerActor(nn.Module):
 
         # Generate high-level control signals.
         if self.controller:
-            right, left, speed = self.controller(observations)
+            right, left, speed = self.controller(observations, swimmer=self.swimmer)
         else:
             right, left, speed = None, None, None
 

@@ -46,4 +46,3 @@ def make_obstacle_avoidance_reflex(n_joints, reaction_distance=0.6):
         return right, left, speed
 
     return reflex
-
