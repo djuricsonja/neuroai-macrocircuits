@@ -4,6 +4,7 @@ Importing this module requires tonic, so call `ensure_tonic()` first.
 """
 
 import argparse
+import collections
 import inspect
 import os
 
@@ -12,11 +13,20 @@ import tonic
 import tonic.torch
 import yaml
 
+from macrocircuits.es import es_run_path
 from macrocircuits.video import display_video
 
 # Imported so that the code strings passed to train() and stored in config.yaml --
 # e.g. 'tonic.torch.agents.PPO(model=ppo_mlp_model(...))' -- resolve when eval'd.
-from macrocircuits.models import d4pg_swimmer_model, ppo_mlp_model, ppo_swimmer_model
+# Every factory run_config() can name is here; see _RL_AGENTS.
+from macrocircuits.models import (
+    d4pg_mlp_model,
+    d4pg_swimmer_model,
+    ddpg_mlp_model,
+    ddpg_swimmer_model,
+    ppo_mlp_model,
+    ppo_swimmer_model,
+)
 
 
 def _eval_namespace():
@@ -34,6 +44,333 @@ def _eval_namespace():
     if caller is not None:
         namespace.update(caller.f_globals)
     return namespace
+
+
+# How run_config() assembles each RL method's tonic agent. The off-policy pair differs
+# from the on-policy three in more than the agent class, so every part is tabulated
+# here rather than hardcoded below:
+#
+#   agent      -- the tonic.torch.agents class.
+#   actor      -- actor updater, named so gradient clipping can be turned on for it.
+#                 None means the method already bounds its own step (TRPO's trust
+#                 region), so it takes no clipping.
+#   critic     -- critic updater. The value objective is method-specific: regression
+#                 onto returns for the on-policy three, Q-learning for DDPG, and a
+#                 distributional Q for D4PG.
+#   models     -- prefix of the factory pair in models.py ('<prefix>_mlp_model' and
+#                 '<prefix>_swimmer_model'). Selects the actor head and critic the
+#                 agent expects: a stochastic ActorCritic for the on-policy three, an
+#                 ActorCriticWithTargets with a deterministic head for DDPG/D4PG.
+#   off_policy -- the actor is deterministic, so the agent explores with an injected
+#                 noise strategy and `action_noise` sets *its* scale rather than the
+#                 std of a stochastic policy head.
+_RLMethod = collections.namedtuple('_RLMethod', 'agent actor critic models off_policy')
+
+_RL_AGENTS = {
+    'ppo': _RLMethod('PPO', 'ClippedRatio', 'VRegression', 'ppo', False),
+    'a2c': _RLMethod('A2C', 'StochasticPolicyGradient', 'VRegression', 'ppo', False),
+    'trpo': _RLMethod('TRPO', None, 'VRegression', 'ppo', False),
+    'ddpg': _RLMethod(
+        'DDPG', 'DeterministicPolicyGradient', 'DeterministicQLearning', 'ddpg', True
+    ),
+    'd4pg': _RLMethod(
+        'D4PG', 'DistributionalDeterministicPolicyGradient',
+        'DistributionalDeterministicQLearning', 'd4pg', True
+    ),
+}
+
+# Every training method a run may choose: the tonic RL agents above, plus 'es' --
+# Evolution Strategies, which is not RL at all (no critic, no gradients, no tonic) and
+# so is trained by macrocircuits.es.run_es rather than train(). See es_config().
+_METHODS = (*_RL_AGENTS, 'es')
+
+# Swimmer body length (rigid links) -> the dm_control task macrocircuits.envs
+# registers on import. Only these two lengths exist.
+_SWIM_TASKS = {6: 'swim', 12: 'swim_12_links'}
+
+
+# Every key a run dict may set, and the value used when it does not set it. A run is
+# one training run: a network plus the algorithm, body, sizes and budget to train it
+# with. resolve_runs() validates run dicts against these keys; run_config() (RL) and
+# es.es_config() (ES) each take a resolved one as **kwargs and ignore the keys that
+# belong to the other -- so all three must stay in sync.
+_RUN_DEFAULTS = {
+    # -- any method --
+    'method': 'ppo',
+    'n_links': 6,
+    'seed': 0,
+    'swimmer_kwargs': None,  # NCAP circuit options, e.g. dict(oscillator_period=60).
+    'label': None,
+    # -- tonic RL methods only ('ppo', 'a2c', 'trpo', 'ddpg', 'd4pg') --
+    'actor_sizes': (256, 256),
+    'critic_sizes': (256, 256),
+    'action_noise': 0.1,
+    'gradient_clip': 0.5,
+    'steps': int(1e5),
+    'epoch_steps': None,  # env steps between test+log points; None -> auto (see run_config).
+    'save_steps': int(5e4),
+    # -- 'es' only --
+    'generations': 100,
+    'population_size': 64,
+    'sigma': 0.02,
+    'lr': 0.02,
+    'weight_decay': 0.0,
+    'n_evals': 1,
+    'hidden_sizes': (64, 64),
+}
+
+# Keys each family ignores. resolve_runs() rejects a run that sets one its method will
+# never read, so a knob that would silently do nothing fails loudly instead.
+_RL_ONLY_KEYS = frozenset({
+    'actor_sizes', 'critic_sizes', 'action_noise', 'gradient_clip',
+    'steps', 'epoch_steps', 'save_steps',
+})
+_ES_ONLY_KEYS = frozenset({
+    'generations', 'population_size', 'sigma', 'lr', 'weight_decay', 'n_evals', 'hidden_sizes'
+})
+
+
+def _run_name(network, method, label=None):
+    """Directory name for a run: its label, or '<network>_<method>' if unlabelled."""
+    return label or f'{network}_{method}'
+
+
+def resolve_runs(runs, defaults=None):
+    """Fill in each run dict and check that no two runs would train into the same directory.
+
+    Lets a notebook declare any number of runs while spelling out only what each one
+    varies:
+
+        resolve_runs(
+            [dict(network='ncap'), dict(network='mlp', label='mlp_wide')],
+            defaults=dict(method='trpo'),
+        )
+
+    Values are taken from the run dict first, then `defaults`, then _RUN_DEFAULTS.
+
+    A run's directory is derived from its label (see _run_name), which defaults to
+    '<network>_<method>'. Two runs that differ only in, say, critic_sizes would
+    therefore share a directory and silently overwrite each other's checkpoints and
+    logs, so that case raises and asks for a distinct label instead.
+
+    A run is also rejected for setting a key its method ignores -- `sigma` on a PPO
+    run, `gradient_clip` on an ES one -- since that knob would otherwise do nothing.
+    Only the run's own keys are checked, not `defaults`, so shared defaults can carry
+    keys that some methods use and others do not.
+
+    Returns a list of complete run dicts, each ready to splat into run_config(**run),
+    es.es_config(**run) or run_path(**run).
+    """
+    resolved = []
+    seen = {}
+    for index, run in enumerate(runs):
+        unknown = set(run) - set(_RUN_DEFAULTS) - {'network'}
+        if unknown:
+            raise ValueError(
+                f'runs[{index}] has unknown key(s) {sorted(unknown)}; '
+                f'valid keys are {sorted(set(_RUN_DEFAULTS) | {"network"})}'
+            )
+        config = {**_RUN_DEFAULTS, **(defaults or {}), **run}
+        if not config.get('network'):
+            raise ValueError(f"runs[{index}] is missing the required 'network' key")
+
+        method = config['method']
+        if method not in _METHODS:
+            raise ValueError(
+                f'runs[{index}] has method={method!r}; must be one of {sorted(_METHODS)}'
+            )
+
+        # Reject knobs the chosen method never reads (see _RL_ONLY_KEYS/_ES_ONLY_KEYS).
+        ignored = set(run) & (_RL_ONLY_KEYS if method == 'es' else _ES_ONLY_KEYS)
+        if ignored:
+            family = 'Evolution Strategies' if method == 'es' else 'the tonic RL methods'
+            raise ValueError(
+                f'runs[{index}] sets {sorted(ignored)}, which method={method!r} ignores '
+                f'(those keys only apply to {family}).'
+            )
+
+        config['label'] = _run_name(config['network'], method, config['label'])
+
+        # Runs of different body lengths live under different task directories, so a
+        # label only has to be unique among runs sharing an n_links.
+        key = (config['n_links'], config['label'])
+        if key in seen:
+            raise ValueError(
+                f"runs[{index}] and runs[{seen[key]}] would both train into "
+                f"'{run_path(**config)}' and overwrite each other. Give at least one of "
+                f"them a distinct label=... (it also names the run in the plot legend)."
+            )
+        seen[key] = index
+        resolved.append(config)
+    return resolved
+
+
+def run_config(
+    network,
+    method='ppo',
+    n_links=6,
+    actor_sizes=(256, 256),
+    critic_sizes=(256, 256),
+    action_noise=0.1,
+    gradient_clip=0.5,
+    steps=int(1e5),
+    epoch_steps=None,
+    save_steps=int(5e4),
+    swimmer_kwargs=None,
+    label=None,
+    **_es_kwargs,
+):
+    """Assemble the code strings train() needs for one (network, algorithm, body) choice.
+
+    train() takes its agent and environment as Python *source strings* and eval's
+    them (see _eval_namespace). This turns the notebook's plain parameters into the
+    matching factory calls so the notebook itself stays declarative.
+
+    Parameters:
+    - network:   'mlp'  -- generic fully-connected baseline, or
+                 'ncap' -- the C. elegans-derived circuit prior. NCAP's actor reads
+                 the time feature the environment appends, so it is enabled for it.
+    - method:    tonic RL agent to train with (see _RL_AGENTS):
+                 on-policy, stochastic policy   -- 'ppo', 'a2c', 'trpo'
+                 off-policy, deterministic policy + replay buffer -- 'ddpg', 'd4pg'
+                 The two families need different actor heads and critics, so the model
+                 factory is chosen to match. 'es' is not an RL method and belongs to
+                 es.run_es; passing it here raises.
+    - n_links:   swimmer length. 6 -> 5 joints ('swim'), 12 -> 11 joints ('swim_12_links').
+    - actor_sizes/critic_sizes: MLP torso widths. NCAP's actor is the fixed circuit,
+                 so actor_sizes is used by the MLP baseline only; critic_sizes applies to both.
+    - action_noise: exploration std. For the on-policy methods it is the std of the NCAP
+                 policy head; for DDPG/D4PG, whose actor is deterministic, it is the
+                 scale of the agent's NormalActionNoise exploration instead.
+    - gradient_clip: max gradient norm per update (0 disables). The swimmer policy uses
+                 a small fixed action std, so without clipping a single large PPO/A2C
+                 step can blow the importance ratio up to inf and drive the weights to
+                 NaN; capping the step keeps the ratio bounded. Applied to the critic
+                 always, and to the actor except for TRPO (already trust-region bounded).
+    - steps/save_steps: total env steps to train for, and the checkpoint interval.
+    - epoch_steps: env steps between the trainer's test+log points. tonic writes a
+                 log.csv row (and runs a test episode) only at these epoch boundaries,
+                 so a run shorter than one epoch produces no log.csv at all. Left None
+                 it auto-picks min(20000, steps // 5): tonic's 20,000-step cadence on
+                 long runs, but ~5 log points on the short demo runs so they still log.
+    - swimmer_kwargs: options forwarded to NCAP's SwimmerModule (network='ncap' only) --
+                 e.g. dict(oscillator_period=60, use_weight_sharing=False). The
+                 use_weight_* flags are the ablations the paper reports.
+    - label:     directory name for this run, and its label in the plot legend. Defaults
+                 to '<network>_<method>'; required to tell apart runs that share both
+                 (see resolve_runs).
+    - **_es_kwargs: ignored, so a resolved run dict carrying ES-only keys can be
+                 splatted straight in: run_config(**run).
+
+    Returns (agent, environment, name, trainer), four strings ready to pass to train().
+    """
+    if method == 'es':
+        raise ValueError(
+            "method='es' is not a tonic RL agent and train() cannot run it; "
+            'use macrocircuits.es.run_es(**es_config(**run)) instead.'
+        )
+    if method not in _RL_AGENTS:
+        raise ValueError(f"method must be one of {sorted(_METHODS)}, got {method!r}")
+    if n_links not in _SWIM_TASKS:
+        raise ValueError(f"n_links must be one of {sorted(_SWIM_TASKS)}, got {n_links!r}")
+
+    rl = _RL_AGENTS[method]
+    task = _SWIM_TASKS[n_links]
+    n_joints = n_links - 1
+
+    # Extra SwimmerModule options, spelled out inside the factory call (NCAP only).
+    swimmer_args = ''.join(f', {key}={value!r}' for key, value in (swimmer_kwargs or {}).items())
+
+    if network == 'mlp':
+        model = f'{rl.models}_mlp_model(actor_sizes={actor_sizes}, critic_sizes={critic_sizes})'
+        time_feature = ''
+    elif network == 'ncap':
+        model_args = [f'n_joints={n_joints}', f'critic_sizes={critic_sizes}']
+        if not rl.off_policy:
+            # Only the stochastic head takes a fixed action std. DDPG/D4PG wrap the
+            # deterministic actor in an exploration strategy instead (see below).
+            model_args.append(f'action_noise={action_noise}')
+        model = f'{rl.models}_swimmer_model(' + ', '.join(model_args) + swimmer_args + ')'
+        # NCAP's SwimmerActor reads observations[..., -1] as the timestep, which tonic
+        # only appends when time_feature=True -- so it is required for this network.
+        time_feature = ', time_feature=True'
+    else:
+        raise ValueError(f"network must be 'mlp' or 'ncap', got {network!r}")
+
+    # Assemble the agent, enabling gradient clipping on its updaters (see the docstring).
+    agent_args = [f'model={model}']
+    if gradient_clip and rl.actor:
+        agent_args.append(
+            f'actor_updater=tonic.torch.updaters.{rl.actor}(gradient_clip={gradient_clip})'
+        )
+    if gradient_clip:
+        agent_args.append(
+            f'critic_updater=tonic.torch.updaters.{rl.critic}(gradient_clip={gradient_clip})'
+        )
+    if rl.off_policy:
+        # A deterministic actor explores only through injected noise; action_noise sets
+        # its scale. Left to tonic's default, D4PG also keeps its 5-step return buffer.
+        agent_args.append(f'exploration=tonic.explorations.NormalActionNoise(scale={action_noise})')
+
+    agent = f'tonic.torch.agents.{rl.agent}(' + ', '.join(agent_args) + ')'
+    environment = f'tonic.environments.ControlSuite("swimmer-{task}"{time_feature})'
+    # tonic dumps a log.csv row (and runs a test episode) only at each epoch boundary,
+    # so a run shorter than one epoch writes no log.csv. Cap the epoch at the run length
+    # so even the short demo runs cross a boundary; None auto-targets ~5 points while
+    # keeping tonic's 20,000-step cadence on long runs (steps >= 1e5 are unchanged).
+    if epoch_steps is None:
+        epoch_steps = min(20000, max(1, int(steps) // 5))
+    trainer = (f'tonic.Trainer(steps={int(steps)}, epoch_steps={int(epoch_steps)}, '
+               f'save_steps={int(save_steps)})')
+    return agent, environment, _run_name(network, method, label), trainer
+
+
+def run_path(network, method='ppo', n_links=6, label=None, **_run_config_kwargs):
+    """Data directory this run writes to -- pass to plot_performance / play_model.
+
+    Ignores the remaining run keys (sizes, budget, ...) so that a resolved run dict can
+    be splatted straight in: run_path(**run).
+
+    ES runs are written by es.run_es under a separate `es/` tree, so they are handed to
+    es_run_path; either way the returned directory holds the log.csv plot_performance
+    reads, which is what lets RL and ES curves go on one plot.
+    """
+    if n_links not in _SWIM_TASKS:
+        raise ValueError(f"n_links must be one of {sorted(_SWIM_TASKS)}, got {n_links!r}")
+    name = _run_name(network, method, label)
+    if method == 'es':
+        return es_run_path(network, n_links=n_links, name=name)
+    task = _SWIM_TASKS[n_links]
+    return f'data/local/experiments/tonic/swimmer-{task}/{name}'
+
+
+def is_trained(path, agent, environment, trainer, seed=0):
+    """True if `path` already holds a checkpointed run with these exact settings.
+
+    Compares the agent/environment/trainer code strings (and seed) that `train()`
+    would record in config.yaml against what is already saved there, so a changed
+    parameter -- steps, sizes, action_noise, swimmer_kwargs, ... -- is retrained even
+    though the run's label (and so its directory, from run_path) is unchanged. Also
+    requires at least one checkpoint, so a run interrupted before its first save is
+    retrained rather than treated as done.
+
+    Pass it the exact (agent, environment, trainer) strings run_config() returns for
+    the run being considered; call before train() and skip the call if it returns True.
+    """
+    config_path = os.path.join(path, 'config.yaml')
+    checkpoints_path = os.path.join(path, 'checkpoints')
+    if not os.path.isfile(config_path) or not os.path.isdir(checkpoints_path):
+        return False
+    if not any(name.startswith('step_') for name in os.listdir(checkpoints_path)):
+        return False
+    with open(config_path, 'r') as config_file:
+        saved = yaml.load(config_file, Loader=yaml.FullLoader) or {}
+    return (
+        saved.get('agent') == agent
+        and saved.get('environment') == environment
+        and saved.get('trainer') == trainer
+        and saved.get('seed') == seed
+    )
 
 
 def train(
