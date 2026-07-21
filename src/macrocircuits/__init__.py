@@ -21,7 +21,6 @@ dm_control), so its entry points are re-exported below.
 """
 
 from macrocircuits.envs import Swim, render, test_dm_control  # SwimToBall folded into Swim (see enable_single_target)
-from macrocircuits.envs import Swim, SwimToBall, render, test_dm_control
 from macrocircuits.es import (
     EvolutionStrategy,
     es_config,
