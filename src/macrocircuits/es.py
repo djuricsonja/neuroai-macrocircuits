@@ -33,14 +33,12 @@ from torch import nn
 
 import yaml
 
-# Importing this registers `swim` / `swim_12_links` / `swim_to_ball` with the
-# dm_control swimmer suite, so `suite.load('swimmer', 'swim')` resolves below.
-from macrocircuits import envs as _envs  # noqa: F401
+# Importing this registers `swim` / `swim_12_links` / `swim_to_ball` / `foraging` /
+# `evasion` with the dm_control swimmer suite, so `suite.load('swimmer', 'swim')`
+# resolves below. env_task/task_env_kwargs map a run's (task, n_links) choice onto the
+# registered task name and its kwargs -- the same helpers `training.run_config` uses.
+from macrocircuits.envs import env_task, task_env_kwargs
 from macrocircuits.ncap import SwimmerModule
-
-# Swimmer body length (rigid links) -> the registered dm_control task. Mirrors the
-# mapping in `training._SWIM_TASKS`; only these two lengths exist.
-_SWIM_TASKS = {6: 'swim', 12: 'swim_12_links'}
 
 
 # ==================================================================================================
@@ -319,7 +317,7 @@ class EvolutionStrategy:
 # High-level entry points (mirror training.run_config / run_path).
 
 
-def es_run_path(network, n_links=6, name=None, data_dir=None):
+def es_run_path(network, n_links=6, name=None, data_dir=None, task='swim'):
     """Directory an ES run writes to -- pass to plot_performance / for checkpoints.
 
     Parallels `training.run_path` but under an `es/` tree rather than `tonic/`, so RL
@@ -327,9 +325,7 @@ def es_run_path(network, n_links=6, name=None, data_dir=None):
     than os.sep to match run_path, which the notebook prints these next to; forward
     slashes are valid paths on Windows too.
     """
-    if n_links not in _SWIM_TASKS:
-        raise ValueError(f"n_links must be one of {sorted(_SWIM_TASKS)}, got {n_links!r}")
-    task = _SWIM_TASKS[n_links]
+    task = env_task(task, n_links)
     name = name or f'{network}_es'
     base = data_dir or 'data/local/experiments/es'
     return '/'.join((base, f'swimmer-{task}', name))
@@ -338,6 +334,8 @@ def es_run_path(network, n_links=6, name=None, data_dir=None):
 def es_config(
     network,
     n_links=6,
+    task='swim',
+    task_kwargs=None,
     generations=100,
     population_size=64,
     sigma=0.02,
@@ -364,6 +362,8 @@ def es_config(
     return dict(
         network=network,
         n_links=n_links,
+        task=task,
+        task_kwargs=task_kwargs,
         n_steps=generations,
         population_size=population_size,
         sigma=sigma,
@@ -381,6 +381,8 @@ def is_es_trained(
     path,
     network,
     n_links=6,
+    task='swim',
+    task_kwargs=None,
     population_size=64,
     sigma=0.02,
     lr=0.02,
@@ -411,6 +413,10 @@ def is_es_trained(
     return (
         saved.get('network') == network
         and saved.get('n_links') == n_links
+        and saved.get('task') == env_task(task, n_links)
+        # Defaulted to {} rather than None so a run saved before task_kwargs existed
+        # still matches a plain run and is not needlessly retrained.
+        and saved.get('task_kwargs', {}) == task_env_kwargs(task, n_links, task_kwargs)
         and saved.get('population_size') == population_size
         and saved.get('sigma') == sigma
         and saved.get('lr') == lr
@@ -474,6 +480,7 @@ def _save_es_run(path, es, config):
 def run_es(
     network='ncap',
     n_links=6,
+    task='swim',
     population_size=64,
     sigma=0.02,
     lr=0.02,
@@ -497,16 +504,20 @@ def run_es(
     fitted `EvolutionStrategy`; its `best_reward`, `best_policy_dict`, and `history`
     hold the results.
 
-    Parameters mirror `training.run_config` where they overlap (`network`, `n_links`);
-    the rest are ES hyperparameters. `n_evals` averages several rollouts per candidate
-    to reduce fitness noise; `swimmer_kwargs` is forwarded to the NCAP `SwimmerModule`
-    (e.g. `oscillator_period`), `task_kwargs` to the dm_control task (e.g. `time_limit`).
-    """
-    if n_links not in _SWIM_TASKS:
-        raise ValueError(f"n_links must be one of {sorted(_SWIM_TASKS)}, got {n_links!r}")
-    task = _SWIM_TASKS[n_links]
+    Parameters mirror `training.run_config` where they overlap (`network`, `n_links`,
+    `task`); the rest are ES hyperparameters. `n_evals` averages several rollouts per
+    candidate to reduce fitness noise; `swimmer_kwargs` is forwarded to the NCAP
+    `SwimmerModule` (e.g. `oscillator_period`), `task_kwargs` to the dm_control task
+    (e.g. `n_obstacles` on 'evasion', or `time_limit`).
 
-    agent = SwimmerESAgent(task=task, n_evals=n_evals, seed=seed, task_kwargs=task_kwargs)
+    Note that ES has no `controller` knob: the RL reflexes steer NCAP through
+    `SwimmerActor`, which the ES policy does not use, so on the target/obstacle tasks
+    the ES circuit swims unsteered and only its reward changes.
+    """
+    env_name = env_task(task, n_links)
+    env_kwargs = task_env_kwargs(task, n_links, task_kwargs)
+
+    agent = SwimmerESAgent(task=env_name, n_evals=n_evals, seed=seed, task_kwargs=env_kwargs)
     policy = make_es_policy(network, agent, hidden_sizes=hidden_sizes, swimmer_kwargs=swimmer_kwargs)
     es = EvolutionStrategy(
         policy,
@@ -532,12 +543,15 @@ def run_es(
             'seed': seed,
             'hidden_sizes': list(hidden_sizes),
             'weight_decay': weight_decay,
-            'task': task,
+            'task': env_name,
             'best_reward': es.best_reward,
-            # Saved so play_es_model() can rebuild the exact policy it trained.
+            # Saved so play_es_model() can rebuild the exact policy and environment.
+            'task_kwargs': env_kwargs,
             'swimmer_kwargs': dict(swimmer_kwargs or {}),
         }
-        _save_es_run(es_run_path(network, n_links, name=name, data_dir=data_dir), es, config)
+        _save_es_run(
+            es_run_path(network, n_links, name=name, data_dir=data_dir, task=task), es, config
+        )
     return es
 
 
@@ -559,7 +573,14 @@ def play_es_model(path, camera_id=0, width=640, height=480, fps=60):
     with open(os.path.join(path, 'config.yaml')) as config_file:
         config = yaml.safe_load(config_file)
 
-    agent = SwimmerESAgent(task=config['task'], n_evals=1, seed=config.get('seed', 0))
+    agent = SwimmerESAgent(
+        task=config['task'],
+        n_evals=1,
+        seed=config.get('seed', 0),
+        # Rebuilt with the task options it trained on, so e.g. an 'evasion' replay has
+        # the same number of obstacles (and so the same observation size).
+        task_kwargs=config.get('task_kwargs'),
+    )
     policy = make_es_policy(
         config['network'],
         agent,

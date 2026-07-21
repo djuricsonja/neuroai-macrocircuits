@@ -12,8 +12,9 @@ The notebooks in `Ressources/` orchestrate; the implementation lives here:
 - `ncap`        -- the C.-elegans-inspired swimmer circuit
 - `plotting`    -- learning curves and architecture diagrams
 
-Importing this package registers the `swim`, `swim_12_links`, and `swim_to_ball`
-tasks with the dm_control swimmer suite, so `suite.load('swimmer', 'swim')` resolves.
+Importing this package registers the `swim`, `swim_12_links`, `swim_to_ball`,
+`foraging` and `evasion` tasks with the dm_control swimmer suite, so
+`suite.load('swimmer', 'swim')` resolves.
 
 `training` and `models` are deliberately not re-exported here: they import
 tonic, which `ensure_tonic()` has to clone first. `es` is tonic-free (pure torch +

@@ -73,10 +73,16 @@ def d4pg_swimmer_model(
     n_joints=5,
     critic_sizes=(256, 256),
     critic_activation=nn.ReLU,
+    controller=None,
     **swimmer_kwargs,
 ):
     return models.ActorCriticWithTargets(
-        actor=SwimmerActor(swimmer=SwimmerModule(n_joints=n_joints, **swimmer_kwargs),),
+        actor=SwimmerActor(
+            swimmer=SwimmerModule(
+                n_joints=n_joints, include_turn_control=(controller is not None), **swimmer_kwargs
+            ),
+            controller=controller,
+        ),
         critic=models.Critic(
             encoder=models.ObservationActionEncoder(),
             torso=models.MLP(critic_sizes, critic_activation),
@@ -113,11 +119,17 @@ def ddpg_swimmer_model(
     n_joints=5,
     critic_sizes=(256, 256),
     critic_activation=nn.ReLU,
+    controller=None,
     **swimmer_kwargs,
 ):
     """NCAP actor for DDPG: the deterministic circuit paired with an action-value critic."""
     return models.ActorCriticWithTargets(
-        actor=SwimmerActor(swimmer=SwimmerModule(n_joints=n_joints, **swimmer_kwargs),),
+        actor=SwimmerActor(
+            swimmer=SwimmerModule(
+                n_joints=n_joints, include_turn_control=(controller is not None), **swimmer_kwargs
+            ),
+            controller=controller,
+        ),
         critic=models.Critic(
             encoder=models.ObservationActionEncoder(),
             torso=models.MLP(critic_sizes, critic_activation),

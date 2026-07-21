@@ -353,6 +353,80 @@ def evasion(
     )
 
 
+@swimmer.SUITE.add()
+def swim_12_links(
+    n_links=12,
+    desired_speed=_SWIM_SPEED,
+    enable_single_target=False,
+    enable_foraging=False,
+    enable_obstacles=False,
+    n_obstacles=3,
+    time_limit=swimmer._DEFAULT_TIME_LIMIT,
+    random=None,
+    environment_kwargs={},
+):
+    """Returns the plain Swim task on a longer, 12-link body."""
+    return swim(
+        n_links=n_links,
+        desired_speed=desired_speed,
+        enable_single_target=enable_single_target,
+        enable_foraging=enable_foraging,
+        enable_obstacles=enable_obstacles,
+        n_obstacles=n_obstacles,
+        time_limit=time_limit,
+        random=random,
+        environment_kwargs=environment_kwargs,
+    )
+
+
+# ==================================================================================================
+# Choosing a task.
+#
+# All of the above are the same Swim task with different flags, so a run picks one by
+# name. training.run_config / es.run_es turn that choice into the dm_control task name
+# tonic loads ('swimmer-<name>'), via env_task/task_env_kwargs below.
+
+# task name -> the extra observation it inserts after 'joints' (None if it adds none).
+# The reflexes in macrocircuits.reflex_steering slice exactly that vector, so which one
+# a task provides is what decides which reflex fits it (see training._CONTROLLERS).
+TASKS = {
+    'swim': None,           # swim forward as fast as possible -- the original task
+    'swim_to_ball': 'to_target',   # one visible, fixed target to reach
+    'foraging': 'to_target',       # food pellets that respawn elsewhere once eaten
+    'evasion': 'to_obstacle',      # swim forward while keeping clear of static obstacles
+}
+
+# Swimmer body length (rigid links) -> the plain-swimming task registered for it. Only
+# 'swim' has a per-length registration; the other tasks take n_links as a task kwarg.
+SWIM_TASKS = {6: 'swim', 12: 'swim_12_links'}
+
+
+def env_task(task='swim', n_links=6):
+    """Registered dm_control task name for a (task, body length) choice.
+
+    'swim' has a separate registration per body length ('swim'/'swim_12_links'); every
+    other task is registered once and takes its length through task_env_kwargs().
+    """
+    if task not in TASKS:
+        raise ValueError(f'task must be one of {sorted(TASKS)}, got {task!r}')
+    if n_links not in SWIM_TASKS:
+        raise ValueError(f'n_links must be one of {sorted(SWIM_TASKS)}, got {n_links!r}')
+    return SWIM_TASKS[n_links] if task == 'swim' else task
+
+
+def task_env_kwargs(task='swim', n_links=6, task_kwargs=None):
+    """Task kwargs to load `task` with -- the run's own, plus n_links where it is needed.
+
+    Only the non-'swim' tasks need n_links passed explicitly (env_task already encodes
+    it for 'swim'), and only when it differs from their default, so a plain run's
+    kwargs stay empty and its stored config string is unchanged.
+    """
+    kwargs = dict(task_kwargs or {})
+    if task != 'swim' and n_links != 6:
+        kwargs.setdefault('n_links', n_links)
+    return kwargs
+
+
 def render(env):
     """Renders the current environment state to an image."""
     return env.physics.render(camera_id=0, width=640, height=480)

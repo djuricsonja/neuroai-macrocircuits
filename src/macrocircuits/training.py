@@ -13,8 +13,16 @@ import tonic
 import tonic.torch
 import yaml
 
+from macrocircuits.envs import TASKS as _TASKS, env_task, task_env_kwargs
 from macrocircuits.es import es_run_path
 from macrocircuits.video import display_video
+
+# Imported for the same reason as the model factories below: run_config() can name one
+# of these inside the agent string, so it has to resolve when that string is eval'd.
+from macrocircuits.reflex_steering import (
+    make_foraging_reflex,
+    make_obstacle_avoidance_reflex,
+)
 
 # Imported so that the code strings passed to train() and stored in config.yaml --
 # e.g. 'tonic.torch.agents.PPO(model=ppo_mlp_model(...))' -- resolve when eval'd.
@@ -84,9 +92,14 @@ _RL_AGENTS = {
 # so is trained by macrocircuits.es.run_es rather than train(). See es_config().
 _METHODS = (*_RL_AGENTS, 'es')
 
-# Swimmer body length (rigid links) -> the dm_control task macrocircuits.envs
-# registers on import. Only these two lengths exist.
-_SWIM_TASKS = {6: 'swim', 12: 'swim_12_links'}
+# Non-learned steering reflexes (macrocircuits.reflex_steering) a run may plug into
+# NCAP's turn inputs, instead of learning that mapping with a network. Each maps the
+# run's `controller` name onto the factory run_config() names in the agent string, and
+# the tasks whose observation layout that reflex slices (see envs.TASKS).
+_CONTROLLERS = {
+    'foraging': ('make_foraging_reflex', ('foraging', 'swim_to_ball')),
+    'obstacle_avoidance': ('make_obstacle_avoidance_reflex', ('evasion',)),
+}
 
 
 # Every key a run dict may set, and the value used when it does not set it. A run is
@@ -99,9 +112,12 @@ _RUN_DEFAULTS = {
     'method': 'ppo',
     'n_links': 6,
     'seed': 0,
+    'task': 'swim',  # which environment to train in; see envs.TASKS.
+    'task_kwargs': None,  # dm_control task options, e.g. dict(n_obstacles=10).
     'swimmer_kwargs': None,  # NCAP circuit options, e.g. dict(oscillator_period=60).
     'label': None,
     # -- tonic RL methods only ('ppo', 'a2c', 'trpo', 'ddpg', 'd4pg') --
+    'controller': None,  # non-learned steering reflex for NCAP; see _CONTROLLERS.
     'actor_sizes': (256, 256),
     'critic_sizes': (256, 256),
     'action_noise': 0.1,
@@ -122,7 +138,7 @@ _RUN_DEFAULTS = {
 # Keys each family ignores. resolve_runs() rejects a run that sets one its method will
 # never read, so a knob that would silently do nothing fails loudly instead.
 _RL_ONLY_KEYS = frozenset({
-    'actor_sizes', 'critic_sizes', 'action_noise', 'gradient_clip',
+    'controller', 'actor_sizes', 'critic_sizes', 'action_noise', 'gradient_clip',
     'steps', 'epoch_steps', 'save_steps',
 })
 _ES_ONLY_KEYS = frozenset({
@@ -183,21 +199,27 @@ def resolve_runs(runs, defaults=None):
         # Reject knobs the chosen method never reads (see _RL_ONLY_KEYS/_ES_ONLY_KEYS).
         ignored = set(run) & (_RL_ONLY_KEYS if method == 'es' else _ES_ONLY_KEYS)
         if ignored:
-            family = 'Evolution Strategies' if method == 'es' else 'the tonic RL methods'
+            # An ES run was rejected for setting RL-only keys, and vice versa.
+            family = 'the tonic RL methods' if method == 'es' else 'Evolution Strategies'
             raise ValueError(
                 f'runs[{index}] sets {sorted(ignored)}, which method={method!r} ignores '
                 f'(those keys only apply to {family}).'
             )
 
+        if config['task'] not in _TASKS:
+            raise ValueError(
+                f"runs[{index}] has task={config['task']!r}; must be one of {sorted(_TASKS)}"
+            )
+
         config['label'] = _run_name(config['network'], method, config['label'])
 
-        # Runs of different body lengths live under different task directories, so a
-        # label only has to be unique among runs sharing an n_links.
-        key = (config['n_links'], config['label'])
+        # Runs on different tasks (or body lengths) already live under different
+        # directories, so a label only has to be unique among runs that would share one.
+        key = run_path(**config)
         if key in seen:
             raise ValueError(
                 f"runs[{index}] and runs[{seen[key]}] would both train into "
-                f"'{run_path(**config)}' and overwrite each other. Give at least one of "
+                f"'{key}' and overwrite each other. Give at least one of "
                 f"them a distinct label=... (it also names the run in the plot legend)."
             )
         seen[key] = index
@@ -209,6 +231,9 @@ def run_config(
     network,
     method='ppo',
     n_links=6,
+    task='swim',
+    task_kwargs=None,
+    controller=None,
     actor_sizes=(256, 256),
     critic_sizes=(256, 256),
     action_noise=0.1,
@@ -237,6 +262,18 @@ def run_config(
                  factory is chosen to match. 'es' is not an RL method and belongs to
                  es.run_es; passing it here raises.
     - n_links:   swimmer length. 6 -> 5 joints ('swim'), 12 -> 11 joints ('swim_12_links').
+    - task:      which environment to train in (see envs.TASKS): 'swim' (forward
+                 swimming, the original task), 'swim_to_ball' (reach one visible
+                 target), 'foraging' (chase respawning food) or 'evasion' (swim forward
+                 while avoiding static obstacles). The latter three add a to_target /
+                 to_obstacle vector to the observation, which `controller` reads.
+    - task_kwargs: options forwarded to the dm_control task, e.g. dict(n_obstacles=10)
+                 on 'evasion' or dict(time_limit=60).
+    - controller: non-learned steering reflex plugged into NCAP's turn inputs
+                 (network='ncap' only), instead of learning that mapping:
+                 'obstacle_avoidance' on 'evasion', 'foraging' on the target tasks.
+                 None leaves the circuit unsteered, as in the paper. See _CONTROLLERS
+                 and macrocircuits.reflex_steering.
     - actor_sizes/critic_sizes: MLP torso widths. NCAP's actor is the fixed circuit,
                  so actor_sizes is used by the MLP baseline only; critic_sizes applies to both.
     - action_noise: exploration std. For the on-policy methods it is the std of the NCAP
@@ -271,12 +308,30 @@ def run_config(
         )
     if method not in _RL_AGENTS:
         raise ValueError(f"method must be one of {sorted(_METHODS)}, got {method!r}")
-    if n_links not in _SWIM_TASKS:
-        raise ValueError(f"n_links must be one of {sorted(_SWIM_TASKS)}, got {n_links!r}")
 
     rl = _RL_AGENTS[method]
-    task = _SWIM_TASKS[n_links]
+    # Raises on an unknown task or body length, so do it before anything is assembled.
+    env_name = env_task(task, n_links)
+    env_kwargs = task_env_kwargs(task, n_links, task_kwargs)
     n_joints = n_links - 1
+
+    if controller is not None:
+        if controller not in _CONTROLLERS:
+            raise ValueError(
+                f'controller must be None or one of {sorted(_CONTROLLERS)}, got {controller!r}'
+            )
+        if network != 'ncap':
+            raise ValueError(
+                f'controller={controller!r} steers NCAP\'s turn inputs, which the '
+                f"{network!r} baseline does not have; drop it or use network='ncap'."
+            )
+        reflex, reflex_tasks = _CONTROLLERS[controller]
+        if task not in reflex_tasks:
+            raise ValueError(
+                f'controller={controller!r} reads the {_TASKS[reflex_tasks[0]]!r} vector '
+                f'that {sorted(reflex_tasks)} add to the observation, but this run is on '
+                f'task={task!r}.'
+            )
 
     # Extra SwimmerModule options, spelled out inside the factory call (NCAP only).
     swimmer_args = ''.join(f', {key}={value!r}' for key, value in (swimmer_kwargs or {}).items())
@@ -290,6 +345,11 @@ def run_config(
             # Only the stochastic head takes a fixed action std. DDPG/D4PG wrap the
             # deterministic actor in an exploration strategy instead (see below).
             model_args.append(f'action_noise={action_noise}')
+        if controller is not None:
+            # The reflex turns the task's egocentric to_target/to_obstacle vector into
+            # NCAP's turn signals; the circuit's own bneuron_turn weight, still learned,
+            # decides how strongly to act on them.
+            model_args.append(f'controller={_CONTROLLERS[controller][0]}({n_joints})')
         model = f'{rl.models}_swimmer_model(' + ', '.join(model_args) + swimmer_args + ')'
         # NCAP's SwimmerActor reads observations[..., -1] as the timestep, which tonic
         # only appends when time_feature=True -- so it is required for this network.
@@ -313,7 +373,10 @@ def run_config(
         agent_args.append(f'exploration=tonic.explorations.NormalActionNoise(scale={action_noise})')
 
     agent = f'tonic.torch.agents.{rl.agent}(' + ', '.join(agent_args) + ')'
-    environment = f'tonic.environments.ControlSuite("swimmer-{task}"{time_feature})'
+    # Only spelled out when non-empty, so a plain 'swim' run's environment string (and
+    # so the config.yaml is_trained() compares against) is unchanged.
+    task_args = f', task_kwargs={env_kwargs!r}' if env_kwargs else ''
+    environment = f'tonic.environments.ControlSuite("swimmer-{env_name}"{time_feature}{task_args})'
     # tonic dumps a log.csv row (and runs a test episode) only at each epoch boundary,
     # so a run shorter than one epoch writes no log.csv. Cap the epoch at the run length
     # so even the short demo runs cross a boundary; None auto-targets ~5 points while
@@ -325,23 +388,21 @@ def run_config(
     return agent, environment, _run_name(network, method, label), trainer
 
 
-def run_path(network, method='ppo', n_links=6, label=None, **_run_config_kwargs):
+def run_path(network, method='ppo', n_links=6, task='swim', label=None, **_run_config_kwargs):
     """Data directory this run writes to -- pass to plot_performance / play_model.
 
-    Ignores the remaining run keys (sizes, budget, ...) so that a resolved run dict can
-    be splatted straight in: run_path(**run).
+    Runs are grouped by the environment they train in, so the same label on 'swim' and
+    on 'evasion' stays two separate runs. Ignores the remaining run keys (sizes,
+    budget, ...) so that a resolved run dict can be splatted straight in: run_path(**run).
 
     ES runs are written by es.run_es under a separate `es/` tree, so they are handed to
     es_run_path; either way the returned directory holds the log.csv plot_performance
     reads, which is what lets RL and ES curves go on one plot.
     """
-    if n_links not in _SWIM_TASKS:
-        raise ValueError(f"n_links must be one of {sorted(_SWIM_TASKS)}, got {n_links!r}")
     name = _run_name(network, method, label)
     if method == 'es':
-        return es_run_path(network, n_links=n_links, name=name)
-    task = _SWIM_TASKS[n_links]
-    return f'data/local/experiments/tonic/swimmer-{task}/{name}'
+        return es_run_path(network, n_links=n_links, name=name, task=task)
+    return f'data/local/experiments/tonic/swimmer-{env_task(task, n_links)}/{name}'
 
 
 def is_trained(path, agent, environment, trainer, seed=0):
