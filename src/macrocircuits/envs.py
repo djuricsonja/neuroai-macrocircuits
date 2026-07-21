@@ -62,6 +62,27 @@ def get_model_and_assets(n_joints, n_obstacles=0):
     return model_string, assets
 
 
+# class Physics(swimmer.Physics):
+#     """Adds obstacle-awareness on top of the stock swimmer Physics."""
+
+#     def nose_to_obstacles(self, n_obstacles):
+#         """Head-local (x, y) vectors from nose to each obstacle, shape (n_obstacles, 2)."""
+#         head_orientation = self.named.data.xmat['head'].reshape(3, 3)
+#         nose_pos = self.named.data.geom_xpos['nose']
+#         vectors = [
+#             (self.named.data.geom_xpos[f'obstacle_{i}'] - nose_pos).dot(head_orientation)[:2]
+#             for i in range(n_obstacles)
+#         ]
+#         return np.array(vectors)
+
+#     def nearest_obstacle(self, n_obstacles):
+#         """Head-local vector and distance to the closest obstacle."""
+#         vectors = self.nose_to_obstacles(n_obstacles)
+#         dists = np.linalg.norm(vectors, axis=-1)
+#         idx = np.argmin(dists)
+#         return vectors[idx], dists[idx]
+
+
 class Physics(swimmer.Physics):
     def _body_geom_names(self):
         return [n for n in self.named.data.geom_xpos.axes.row.names if n.startswith('visual')]
@@ -96,14 +117,11 @@ class Swim(swimmer.Swimmer):
         enable_foraging=False,
         enable_obstacles=False,
         n_obstacles=3,
-        speed_reward_weight = 1.0,
         target_reward_weight=1.0,
         obstacle_penalty_weight=1.0,
         obstacle_safe_distance=0.4,
         obstacle_min_distance=0.5,
         food_size=0.02,
-        food_flash_steps=5,       # how many control steps the flash lasts
-        food_flash_color=(1.0, 1.0, 0.2, 1.0),  # bright yellow flash
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -112,75 +130,42 @@ class Swim(swimmer.Swimmer):
         self._enable_foraging = enable_foraging
         self._enable_obstacles = enable_obstacles
         self._n_obstacles = n_obstacles if enable_obstacles else 0
-        self._speed_reward_weight = speed_reward_weight
         self._target_reward_weight = target_reward_weight
         self._obstacle_penalty_weight = obstacle_penalty_weight
         self._obstacle_safe_distance = obstacle_safe_distance
         self._obstacle_min_distance = obstacle_min_distance
         self._food_size = food_size
-        self._food_flash_steps = food_flash_steps
-        self._food_flash_color = np.array(food_flash_color)
-        self._food_flash_remaining = 0
-        self._food_default_color = None  # captured on first reset
-
 
     def initialize_episode(self, physics):
+        # disabled = bool(physics.model.opt.disableflags & mujoco.mjtDisableBit.mjDSBL_CONTACT)
+        # print('contact globally disabled:', disabled)
+
         if self._enable_foraging or self._enable_single_target:
             # Skip Swim's target-hiding step; call the grandparent (stock Swimmer)
             # directly so the target is randomly placed AND stays visible.
             super(Swim, self).initialize_episode(physics)
-            physics.forward()
-
             if self._enable_foraging:
                 physics.named.model.geom_size['target', 0] = self._food_size
-
-                if self._food_default_color is None:
-                    self._food_default_color = physics.named.model.mat_rgba['target'].copy()
-                physics.named.model.mat_rgba['target'] = self._food_default_color
-                self._food_flash_remaining = 0
-
-                # Place food a short distance directly ahead of the worm's current heading.
-                forage_distance = 0.15  # ~1-2 forward moves given ~0.1 unit segment spacing
-                head_pos = physics.named.data.xpos['head']
-                head_orientation = physics.named.data.xmat['head'].reshape(3, 3)
-                forward_local = np.array([0, -1, 0])  # head-local forward, per reward's -y convention
-                forward_world = head_orientation.dot(forward_local)
-                target_xy = head_pos[:2] + forage_distance * forward_world[:2]
-
-                physics.named.model.geom_pos['target', 'x'] = target_xy[0]
-                physics.named.model.geom_pos['target', 'y'] = target_xy[1]
-                physics.forward()  # propagate the new target position
         else:
             super().initialize_episode(physics)
             physics.named.model.mat_rgba['target', 'a'] = 0
             physics.named.model.mat_rgba['target_default', 'a'] = 0
             physics.named.model.mat_rgba['target_highlight', 'a'] = 0
 
+        # print(f"All Body Psotions: {self.all_body_positions(physics)}")
+        # print(f"Observation: {self.get_observation(physics)}")
+
     def all_body_positions(self, physics):
         """World (x, y, z) position of every body in the model, including the head."""
         names = physics.named.data.xpos.axes.row.names
         return names, physics.named.data.xpos[:]
     
-    def worm_positions(physics, n_joints, head_name):
-        """World (x, y, z) position of just the worm's own segments, excluding
-        world/target/obstacle bodies. head_name must be confirmed from
-        all_body_positions' printed names first (e.g. 'head')."""
-        names = [head_name] + [f'segment_{i}' for i in range(n_joints)]
-        return np.array([physics.named.data.xpos[n] for n in names])
-    
-    def _respawn_food_near_worm(self, physics):
-        """Places the food a short distance in front of or beside the worm's
-        *current* position/heading -- never behind it."""
-        head_pos = physics.named.data.xpos['head']
-        head_orientation = physics.named.data.xmat['head'].reshape(3, 3)
-        local_angle = self.random.uniform(-np.pi / 2, np.pi / 2)  # front-hemisphere only
-        forward_local = np.array([np.sin(local_angle), -np.cos(local_angle), 0])  # -y is forward
-        distance = self.random.uniform(0.15, 0.3)
-        forward_world = head_orientation.dot(forward_local)
-        target_xy = head_pos[:2] + distance * forward_world[:2]
-        physics.named.model.geom_pos['target', 'x'] = target_xy[0]
-        physics.named.model.geom_pos['target', 'y'] = target_xy[1]
-        physics.forward()
+    # def worm_positions(physics, n_joints, head_name):
+    #     """World (x, y, z) position of just the worm's own segments, excluding
+    #     world/target/obstacle bodies. head_name must be confirmed from
+    #     all_body_positions' printed names first (e.g. 'head')."""
+    #     names = [head_name] + [f'segment_{i}' for i in range(n_joints)]
+    #     return np.array([physics.named.data.xpos[n] for n in names])
 
     def get_observation(self, physics):
         """joints, [to_target], [to_obstacle], body_velocities -- in that fixed order,
@@ -197,7 +182,7 @@ class Swim(swimmer.Swimmer):
 
     def get_reward(self, physics):
         forward_velocity = -physics.named.data.sensordata['head_vel'][1]
-        reward = self._speed_reward_weight * rewards.tolerance(
+        reward = rewards.tolerance(
             forward_velocity,
             bounds=(self._desired_speed, float('inf')),
             margin=self._desired_speed,
@@ -223,15 +208,10 @@ class Swim(swimmer.Swimmer):
                 margin=5 * target_size,
                 sigmoid='long_tail',
             )
-
-            if self._food_flash_remaining > 0:
-                self._food_flash_remaining -= 1
-                if self._food_flash_remaining == 0:
-                    self._respawn_food_near_worm(physics)
-                    physics.named.model.mat_rgba['target'] = self._food_default_color
-            elif dist < target_size:
-                physics.named.model.mat_rgba['target'] = self._food_flash_color
-                self._food_flash_remaining = self._food_flash_steps
+            if dist < target_size:  # worm reached the food -- respawn it
+                xpos, ypos = self.random.uniform(-1.5, 1.5, size=2)
+                physics.named.model.geom_pos['target', 'x'] = xpos
+                physics.named.model.geom_pos['target', 'y'] = ypos
 
         if self._enable_obstacles:
             _, dist = physics.nearest_obstacle(self._n_obstacles)
@@ -264,7 +244,6 @@ def swim(
         n_links, n_obstacles=n_obstacles if enable_obstacles else 0
     )
     physics = Physics.from_xml_string(model_string, assets=assets)
-    physics.model.opt.disableflags = 0
     task = Swim(
         desired_speed=desired_speed,
         enable_single_target=enable_single_target,
@@ -296,81 +275,12 @@ def swim_to_ball(
         n_links, n_obstacles=n_obstacles if enable_obstacles else 0
     )
     physics = Physics.from_xml_string(model_string, assets=assets)
-    physics.model.opt.disableflags = 0
     task = Swim(
         desired_speed=desired_speed,
         enable_single_target=enable_single_target,
         enable_foraging=enable_foraging,
         enable_obstacles=enable_obstacles,
         n_obstacles=n_obstacles,
-        random=random,
-    )
-    return control.Environment(
-        physics, task, time_limit=time_limit,
-        control_timestep=swimmer._CONTROL_TIMESTEP, **environment_kwargs,
-    )
-
-
-@swimmer.SUITE.add()
-def foraging(
-    n_links=6,
-    desired_speed=_SWIM_SPEED,
-    enable_single_target = False,
-    enable_foraging=True,
-    enable_obstacles=False,
-    n_obstacles=3,
-    speed_reward_weight=0.0,
-    time_limit=swimmer._DEFAULT_TIME_LIMIT,
-    random=None,
-    environment_kwargs={},
-):
-    """Returns the Swim task, with optional foraging and obstacle avoidance."""
-    model_string, assets = get_model_and_assets(
-        n_links, n_obstacles=n_obstacles if enable_obstacles else 0
-    )
-    physics = Physics.from_xml_string(model_string, assets=assets)
-    physics.model.opt.disableflags = 1
-    task = Swim(
-        desired_speed=desired_speed,
-        enable_single_target=enable_single_target,
-        enable_foraging=enable_foraging,
-        enable_obstacles=enable_obstacles,
-        n_obstacles=n_obstacles,
-        speed_reward_weight=speed_reward_weight,
-        random=random,
-    )
-    return control.Environment(
-        physics, task, time_limit=time_limit,
-        control_timestep=swimmer._CONTROL_TIMESTEP, **environment_kwargs,
-    )
-
-
-@swimmer.SUITE.add()
-def evasion(
-    n_links=6,
-    desired_speed=_SWIM_SPEED,
-    enable_single_target = False,
-    enable_foraging=False,
-    enable_obstacles=True,
-    n_obstacles=3,
-    speed_reward_weight=0.0,
-    time_limit=swimmer._DEFAULT_TIME_LIMIT,
-    random=None,
-    environment_kwargs={},
-):
-    """Returns the Swim task, with optional foraging and obstacle avoidance."""
-    model_string, assets = get_model_and_assets(
-        n_links, n_obstacles=n_obstacles if enable_obstacles else 0
-    )
-    physics = Physics.from_xml_string(model_string, assets=assets)
-    physics.model.opt.disableflags = 0
-    task = Swim(
-        desired_speed=desired_speed,
-        enable_single_target=enable_single_target,
-        enable_foraging=enable_foraging,
-        enable_obstacles=enable_obstacles,
-        n_obstacles=n_obstacles,
-        speed_reward_weight=speed_reward_weight,
         random=random,
     )
     return control.Environment(

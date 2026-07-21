@@ -10,6 +10,9 @@ The notebooks in `Ressources/` orchestrate; the implementation lives here:
 - `models`      -- actor-critic factories for the MLP baseline and NCAP
 - `constraints` -- weight/activation constraints and initializers
 - `ncap`        -- the C.-elegans-inspired swimmer circuit
+- `controllers` -- what steers that circuit on the target/obstacle tasks, and the
+                   registry (`CONTROLLERS`) both trainers pick one from
+- `reflex_steering` -- the fixed, non-learned steering reflexes
 - `plotting`    -- learning curves and architecture diagrams
 
 Importing this package registers the `swim`, `swim_12_links`, `swim_to_ball`,

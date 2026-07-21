@@ -17,10 +17,16 @@ from macrocircuits.envs import TASKS as _TASKS, env_task, task_env_kwargs
 from macrocircuits.es import es_run_path
 from macrocircuits.video import display_video
 
-# Imported for the same reason as the model factories below: run_config() can name one
-# of these inside the agent string, so it has to resolve when that string is eval'd.
-from macrocircuits.reflex_steering import (
+# The make_* factories are imported for the same reason as the model factories below:
+# run_config() can name one of them inside the agent string, so it has to resolve when
+# that string is eval'd. CONTROLLERS is the table it names them from -- it covers the
+# fixed reflexes and the learned MLP controllers alike, so both reach NCAP the same way.
+from macrocircuits.controllers import (
+    CONTROLLERS as _CONTROLLERS,
+    check_controller,
+    make_foraging_mlp,
     make_foraging_reflex,
+    make_obstacle_avoidance_mlp,
     make_obstacle_avoidance_reflex,
 )
 
@@ -92,14 +98,6 @@ _RL_AGENTS = {
 # so is trained by macrocircuits.es.run_es rather than train(). See es_config().
 _METHODS = (*_RL_AGENTS, 'es')
 
-# Non-learned steering reflexes (macrocircuits.reflex_steering) a run may plug into
-# NCAP's turn inputs, instead of learning that mapping with a network. Each maps the
-# run's `controller` name onto the factory run_config() names in the agent string, and
-# the tasks whose observation layout that reflex slices (see envs.TASKS).
-_CONTROLLERS = {
-    'foraging': ('make_foraging_reflex', ('foraging', 'swim_to_ball')),
-    'obstacle_avoidance': ('make_obstacle_avoidance_reflex', ('evasion',)),
-}
 
 
 # Every key a run dict may set, and the value used when it does not set it. A run is
@@ -114,10 +112,10 @@ _RUN_DEFAULTS = {
     'seed': 0,
     'task': 'swim',  # which environment to train in; see envs.TASKS.
     'task_kwargs': None,  # dm_control task options, e.g. dict(n_obstacles=10).
+    'controller': None,  # steering controller for NCAP; see controllers.CONTROLLERS.
     'swimmer_kwargs': None,  # NCAP circuit options, e.g. dict(oscillator_period=60).
     'label': None,
     # -- tonic RL methods only ('ppo', 'a2c', 'trpo', 'ddpg', 'd4pg') --
-    'controller': None,  # non-learned steering reflex for NCAP; see _CONTROLLERS.
     'actor_sizes': (256, 256),
     'critic_sizes': (256, 256),
     'action_noise': 0.1,
@@ -138,7 +136,7 @@ _RUN_DEFAULTS = {
 # Keys each family ignores. resolve_runs() rejects a run that sets one its method will
 # never read, so a knob that would silently do nothing fails loudly instead.
 _RL_ONLY_KEYS = frozenset({
-    'controller', 'actor_sizes', 'critic_sizes', 'action_noise', 'gradient_clip',
+    'actor_sizes', 'critic_sizes', 'action_noise', 'gradient_clip',
     'steps', 'epoch_steps', 'save_steps',
 })
 _ES_ONLY_KEYS = frozenset({
@@ -269,11 +267,12 @@ def run_config(
                  to_obstacle vector to the observation, which `controller` reads.
     - task_kwargs: options forwarded to the dm_control task, e.g. dict(n_obstacles=10)
                  on 'evasion' or dict(time_limit=60).
-    - controller: non-learned steering reflex plugged into NCAP's turn inputs
-                 (network='ncap' only), instead of learning that mapping:
-                 'obstacle_avoidance' on 'evasion', 'foraging' on the target tasks.
-                 None leaves the circuit unsteered, as in the paper. See _CONTROLLERS
-                 and macrocircuits.reflex_steering.
+    - controller: what turns the task's sensed vector into NCAP's turn inputs
+                 (network='ncap' only). Either a fixed reflex ('foraging' on the target
+                 tasks, 'obstacle_avoidance' on 'evasion') or its learned MLP counterpart
+                 ('mlp_foraging', 'mlp_obstacle_avoidance'), whose weights are trained
+                 along with the circuit. None leaves the circuit unsteered, as in the
+                 paper. See macrocircuits.controllers.CONTROLLERS.
     - actor_sizes/critic_sizes: MLP torso widths. NCAP's actor is the fixed circuit,
                  so actor_sizes is used by the MLP baseline only; critic_sizes applies to both.
     - action_noise: exploration std. For the on-policy methods it is the std of the NCAP
@@ -315,23 +314,7 @@ def run_config(
     env_kwargs = task_env_kwargs(task, n_links, task_kwargs)
     n_joints = n_links - 1
 
-    if controller is not None:
-        if controller not in _CONTROLLERS:
-            raise ValueError(
-                f'controller must be None or one of {sorted(_CONTROLLERS)}, got {controller!r}'
-            )
-        if network != 'ncap':
-            raise ValueError(
-                f'controller={controller!r} steers NCAP\'s turn inputs, which the '
-                f"{network!r} baseline does not have; drop it or use network='ncap'."
-            )
-        reflex, reflex_tasks = _CONTROLLERS[controller]
-        if task not in reflex_tasks:
-            raise ValueError(
-                f'controller={controller!r} reads the {_TASKS[reflex_tasks[0]]!r} vector '
-                f'that {sorted(reflex_tasks)} add to the observation, but this run is on '
-                f'task={task!r}.'
-            )
+    check_controller(controller, network, task)
 
     # Extra SwimmerModule options, spelled out inside the factory call (NCAP only).
     swimmer_args = ''.join(f', {key}={value!r}' for key, value in (swimmer_kwargs or {}).items())
@@ -346,9 +329,10 @@ def run_config(
             # deterministic actor in an exploration strategy instead (see below).
             model_args.append(f'action_noise={action_noise}')
         if controller is not None:
-            # The reflex turns the task's egocentric to_target/to_obstacle vector into
-            # NCAP's turn signals; the circuit's own bneuron_turn weight, still learned,
-            # decides how strongly to act on them.
+            # The controller turns the task's egocentric to_target/to_obstacle vector
+            # into NCAP's turn signals; the circuit's own bneuron_turn weight, still
+            # learned, decides how strongly to act on them. An MLP controller is an
+            # nn.Module, so SwimmerActor registers it and tonic trains it too.
             model_args.append(f'controller={_CONTROLLERS[controller][0]}({n_joints})')
         model = f'{rl.models}_swimmer_model(' + ', '.join(model_args) + swimmer_args + ')'
         # NCAP's SwimmerActor reads observations[..., -1] as the timestep, which tonic

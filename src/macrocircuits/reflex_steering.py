@@ -1,6 +1,13 @@
-"""Derive NCAP's turn signals directly from the already-
-egocentric to_target/to_obstacle vectors, instead of learning the mapping with a
-network.
+"""Fixed, non-learned steering reflexes for NCAP.
+
+Each derives the circuit's turn signals directly from the already-egocentric
+to_target/to_obstacle vector a task puts in the observation, instead of learning that
+mapping with a network -- the `MLPController` in `controllers` is the learned
+alternative, and `controllers.CONTROLLERS` is the registry a run picks either from.
+
+A reflex is a plain closure `reflex(observations) -> (right, left, speed)`, each
+`(..., 1)` in `[0, 1]`; it holds no parameters, so a run using one still trains or
+evolves only the circuit's own `bneuron_turn` weight.
 """
 
 import torch
@@ -46,3 +53,4 @@ def make_obstacle_avoidance_reflex(n_joints, reaction_distance=0.6):
         return right, left, speed
 
     return reflex
+

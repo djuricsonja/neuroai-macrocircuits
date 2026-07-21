@@ -1,100 +1,153 @@
+"""The steering controllers a run may plug into NCAP's turn inputs, and the registry
+both trainers pick one from.
+
+NCAP's circuit swims, but it cannot sense food or obstacles: the tasks that add a
+`to_target` / `to_obstacle` vector to the observation (see `envs.TASKS`) leave that
+vector unused unless something turns it into the circuit's `right_control` /
+`left_control` signals. A run chooses that something with `controller=`:
+
+| `controller=` | what steers | learned? |
+|---|---|---|
+| `None` | nothing -- the circuit swims straight, only its reward changes | -- |
+| `'foraging'` / `'obstacle_avoidance'` | a fixed reflex (`reflex_steering`) | no |
+| `'mlp_foraging'` / `'mlp_obstacle_avoidance'` | a small MLP (`MLPController`) | yes |
+
+That is the comparison the tasks exist for: how much of the steering has to be learned
+once the swimming itself is given by the architecture.
+
+All three are the same shape to the rest of the code -- a callable
+`controller(observations) -> (right, left, speed)`, each `(..., 1)` in `[0, 1]`, or
+`None`. The reflexes are plain closures; `MLPController` is an `nn.Module`, so
+assigning it to `SwimmerActor.controller` (RL) or `NCAPSwimmerPolicy.controller` (ES)
+registers it as a submodule and its parameters are trained/evolved along with the
+circuit's own. Nothing else has to know which kind it got.
+"""
+
 import torch
 import torch.nn as nn
 
-from .reflex_steering import make_foraging_reflex, make_obstacle_avoidance_reflex
-
-def _ignore_swimmer(reflex_fn):
-    """Adapts a (observations)-only reflex to the (observations, swimmer=...)
-    signature SwimmerActor.forward() actually calls."""
-    def wrapped(observations, swimmer=None):
-        return reflex_fn(observations)
-    return wrapped
+from macrocircuits.envs import TASKS
+from macrocircuits.reflex_steering import (
+    make_foraging_reflex,
+    make_obstacle_avoidance_reflex,
+)
 
 
+# ==================================================================================================
+# Learned controllers.
 
-def foraging_target(observations, n_joints):
-    """Assumes task layout: joints, to_target, body_velocities
-    (i.e. enable_foraging=True, enable_obstacles=False)."""
-    joints_slice = slice(n_joints)
-    target_slice = slice(n_joints, n_joints + 2)
+def foraging_state(observations, n_joints):
+    """Joint angles plus the head-egocentric [forward, lateral] vector to the food.
 
-    joints = observations[..., joints_slice]
-    to_target = observations[..., target_slice]     # [forward, lateral], head-egocentric
-    combined = torch.cat((joints, to_target), dim=-1)
-    return combined
-
-
-def obstacle_avoidance_target(observations, n_joints):
-    """Assumes task layout: joints, to_obstacle, body_velocities
-    (i.e. enable_obstacles=True, enable_foraging=False)."""
-    joints_slice = slice(n_joints)
-    obstacle_slice = slice(n_joints, n_joints + 2)
-
-    joints = observations[..., joints_slice]
-    to_obstacle = observations[..., obstacle_slice]   # [forward, lateral], head-egocentric
-    combined = torch.cat((joints, to_obstacle), dim=-1)
-    return combined
+    Assumes observation layout: joints, to_target, body_velocities -- i.e. a task with
+    enable_foraging (or enable_single_target) on and enable_obstacles off.
+    """
+    joints = observations[..., :n_joints]
+    to_target = observations[..., n_joints:n_joints + 2]
+    return torch.cat((joints, to_target), dim=-1)
 
 
-def forage_and_avoid_target(observations, n_joints):
-    """Assumes task layout: joints, to_target, to_obstacle, body_velocities
-    (i.e. enable_foraging=True, enable_obstacles=True)."""
-    joints_slice = slice(n_joints)
-    target_slice = slice(n_joints, n_joints + 2)
-    obstacle_slice = slice(n_joints + 2, n_joints + 4)
+def obstacle_state(observations, n_joints):
+    """Joint angles plus the head-egocentric [forward, lateral] vector to the nearest
+    obstacle.
 
-    joints = observations[..., joints_slice]
-    target = observations[..., target_slice]
-    obstacle = observations[..., obstacle_slice]
-    combined = torch.cat((joints, target, obstacle), dim=-1)
-    return combined
+    Assumes observation layout: joints, to_obstacle, body_velocities -- i.e. a task with
+    enable_obstacles on and enable_foraging off.
+    """
+    joints = observations[..., :n_joints]
+    to_obstacle = observations[..., n_joints:n_joints + 2]
+    return torch.cat((joints, to_obstacle), dim=-1)
 
 
-class MLP_controller(nn.Module):
-    """Learns to map sensed target position to steering/speed commands,
-    instead of hand-deriving the mapping. Assumes task layout:
-    joints, to_target, body_velocities (enable_foraging=True)."""
+class MLPController(nn.Module):
+    """Learns the sensed-vector -> steering-command mapping the reflexes hand-derive.
 
-    def __init__(self, n_joints, input_size=2, hidden_size=16, state_fn=foraging_target):
+    `state_fn` slices the inputs out of the raw observation (which is why the controller
+    needs `n_joints`), and the head outputs `right`, `left`, `speed`, squashed to [0, 1]
+    to match the range the circuit's turn inputs expect.
+
+    Note that `speed` only does anything when the circuit was built with
+    `include_speed_control=True` (via a run's `swimmer_kwargs`); otherwise
+    `SwimmerModule` ignores the signal and that head simply gets no gradient.
+    """
+
+    def __init__(self, n_joints, state_fn, hidden_size=16):
         super().__init__()
-        # print(f"controller Input Size: {input_size}")
         self.n_joints = n_joints
-        self.net = nn.Sequential(
-            nn.Linear(input_size, hidden_size),   # input: [forward, lateral] to target
-            nn.Tanh(),
-            nn.Linear(hidden_size, 3),   # output: right, left, speed (pre-activation)
-        )
         self.state_fn = state_fn
+        self.net = nn.Sequential(
+            nn.Linear(n_joints + 2, hidden_size),  # joints + [forward, lateral]
+            nn.Tanh(),
+            nn.Linear(hidden_size, 3),  # right, left, speed (pre-activation)
+        )
 
-    def forward(self, observations, swimmer=None):
-        # print(f"Observations size: {observations.size()}")
-        x = self.state_fn(observations, self.n_joints)
-        # print(f"x shape size: {x.size()}")
-        out = torch.sigmoid(self.net(x))   # squash to [0, 1], same range other controllers used
-        right, left, speed = out.split(1, dim=-1)  # each stays shape (..., 1)
+    def forward(self, observations):
+        out = torch.sigmoid(self.net(self.state_fn(observations, self.n_joints)))
+        right, left, speed = out.split(1, dim=-1)  # each keeps shape (..., 1)
         return right, left, speed
 
 
-def controllers_map(controller_name, n_joints=None, hidden_size=16):
-    if controller_name is None:
+def make_foraging_mlp(n_joints, hidden_size=16):
+    """Learned counterpart of `make_foraging_reflex`: steer from the vector to the food."""
+    return MLPController(n_joints, foraging_state, hidden_size=hidden_size)
+
+
+def make_obstacle_avoidance_mlp(n_joints, hidden_size=16):
+    """Learned counterpart of `make_obstacle_avoidance_reflex`: steer from the vector to
+    the nearest obstacle."""
+    return MLPController(n_joints, obstacle_state, hidden_size=hidden_size)
+
+
+# ==================================================================================================
+# The registry both trainers select from.
+
+# Each controller a run may name, mapped onto its factory and the tasks whose observation
+# layout that factory assumes (see envs.TASKS). The factory is held as a *name* so
+# training.run_config can spell it into the agent source string it eval's;
+# make_controller resolves it to the real thing for callers that just want the object.
+# The reflex and MLP entries deliberately cover the same tasks, so the three controller
+# choices are comparable on one environment.
+CONTROLLERS = {
+    'foraging': ('make_foraging_reflex', ('foraging', 'swim_to_ball')),
+    'obstacle_avoidance': ('make_obstacle_avoidance_reflex', ('evasion',)),
+    'mlp_foraging': ('make_foraging_mlp', ('foraging', 'swim_to_ball')),
+    'mlp_obstacle_avoidance': ('make_obstacle_avoidance_mlp', ('evasion',)),
+}
+
+
+def check_controller(controller, network, task):
+    """Raise unless `controller` can actually steer this (network, task) combination.
+
+    Called by both trainers before anything is built, so a mismatch fails with an
+    explanation rather than as a bare AssertionError inside SwimmerModule (turn control
+    on with no signal to feed it) or as a silently useless controller reading whichever
+    numbers happen to sit where its vector should be.
+    """
+    if controller is None:
+        return
+    if controller not in CONTROLLERS:
+        raise ValueError(
+            f'controller must be None or one of {sorted(CONTROLLERS)}, got {controller!r}'
+        )
+    if network != 'ncap':
+        raise ValueError(
+            f"controller={controller!r} steers NCAP's turn inputs, which the {network!r} "
+            f"baseline does not have; drop it or use network='ncap'."
+        )
+    tasks = CONTROLLERS[controller][1]
+    if task not in tasks:
+        raise ValueError(
+            f'controller={controller!r} reads the {TASKS[tasks[0]]!r} vector that '
+            f'{sorted(tasks)} add to the observation, but this run is on task={task!r}.'
+        )
+
+
+def make_controller(controller, n_joints):
+    """Build the named controller for an `n_joints` body; None passes through as None."""
+    if controller is None:
         return None
-    if n_joints is not None:
-        if n_joints < 2:
-            return None
-    
-    name = controller_name.upper()
-    if name in ['FORAGE', 'FORAGING', 'AVOID', 'AVOIDANCE', 'OBSTACLE', 'EVASION']:
-        if name in ['FORAGE', 'FORAGING']:
-            state_fn = foraging_target
-        else:
-            state_fn = obstacle_avoidance_target
-        return MLP_controller(n_joints=n_joints, input_size=n_joints+2, hidden_size=hidden_size, state_fn=state_fn)
-    elif name in ['FORAGE_AVOID', 'FORAGING_AVOIDANCE', 'FORAGING_EVASION']:
-        state_fn = forage_and_avoid_target
-        return MLP_controller(n_joints=n_joints, input_size=n_joints+4, hidden_size=hidden_size, state_fn=state_fn)
-    elif name == 'FORAGE_REFLEX':
-        return _ignore_swimmer(make_foraging_reflex(n_joints))
-    elif name == 'AVOID_REFLEX':
-        return _ignore_swimmer(make_obstacle_avoidance_reflex(n_joints))
-    else:
-        return None
+    if controller not in CONTROLLERS:
+        raise ValueError(
+            f'controller must be None or one of {sorted(CONTROLLERS)}, got {controller!r}'
+        )
+    return globals()[CONTROLLERS[controller][0]](n_joints)
