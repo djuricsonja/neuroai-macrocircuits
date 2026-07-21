@@ -96,6 +96,7 @@ class Swim(swimmer.Swimmer):
         enable_foraging=False,
         enable_obstacles=False,
         n_obstacles=3,
+        speed_reward_weight = 1.0,
         target_reward_weight=1.0,
         obstacle_penalty_weight=1.0,
         obstacle_safe_distance=0.4,
@@ -111,6 +112,7 @@ class Swim(swimmer.Swimmer):
         self._enable_foraging = enable_foraging
         self._enable_obstacles = enable_obstacles
         self._n_obstacles = n_obstacles if enable_obstacles else 0
+        self._speed_reward_weight = speed_reward_weight
         self._target_reward_weight = target_reward_weight
         self._obstacle_penalty_weight = obstacle_penalty_weight
         self._obstacle_safe_distance = obstacle_safe_distance
@@ -195,7 +197,7 @@ class Swim(swimmer.Swimmer):
 
     def get_reward(self, physics):
         forward_velocity = -physics.named.data.sensordata['head_vel'][1]
-        reward = rewards.tolerance(
+        reward = self._speed_reward_weight * rewards.tolerance(
             forward_velocity,
             bounds=(self._desired_speed, float('inf')),
             margin=self._desired_speed,
@@ -317,6 +319,7 @@ def foraging(
     enable_foraging=True,
     enable_obstacles=False,
     n_obstacles=3,
+    speed_reward_weight=0.0,
     time_limit=swimmer._DEFAULT_TIME_LIMIT,
     random=None,
     environment_kwargs={},
@@ -333,6 +336,7 @@ def foraging(
         enable_foraging=enable_foraging,
         enable_obstacles=enable_obstacles,
         n_obstacles=n_obstacles,
+        speed_reward_weight=speed_reward_weight,
         random=random,
     )
     return control.Environment(
@@ -349,6 +353,7 @@ def evasion(
     enable_foraging=False,
     enable_obstacles=True,
     n_obstacles=3,
+    speed_reward_weight=0.0,
     time_limit=swimmer._DEFAULT_TIME_LIMIT,
     random=None,
     environment_kwargs={},
@@ -365,6 +370,7 @@ def evasion(
         enable_foraging=enable_foraging,
         enable_obstacles=enable_obstacles,
         n_obstacles=n_obstacles,
+        speed_reward_weight=speed_reward_weight,
         random=random,
     )
     return control.Environment(
