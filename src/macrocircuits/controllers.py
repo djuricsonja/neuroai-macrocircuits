@@ -1,6 +1,16 @@
 import torch
 import torch.nn as nn
 
+from .reflex_steering import make_foraging_reflex, make_obstacle_avoidance_reflex
+
+def _ignore_swimmer(reflex_fn):
+    """Adapts a (observations)-only reflex to the (observations, swimmer=...)
+    signature SwimmerActor.forward() actually calls."""
+    def wrapped(observations, swimmer=None):
+        return reflex_fn(observations)
+    return wrapped
+
+
 
 def foraging_target(observations, n_joints):
     """Assumes task layout: joints, to_target, body_velocities
@@ -82,5 +92,9 @@ def controllers_map(controller_name, n_joints=None, hidden_size=16):
     elif name in ['FORAGE_AVOID', 'FORAGING_AVOIDANCE', 'FORAGING_EVASION']:
         state_fn = forage_and_avoid_target
         return MLP_controller(n_joints=n_joints, input_size=n_joints+4, hidden_size=hidden_size, state_fn=state_fn)
+    elif name == 'FORAGE_REFLEX':
+        return _ignore_swimmer(make_foraging_reflex(n_joints))
+    elif name == 'AVOID_REFLEX':
+        return _ignore_swimmer(make_obstacle_avoidance_reflex(n_joints))
     else:
         return None
