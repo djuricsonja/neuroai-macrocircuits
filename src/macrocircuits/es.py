@@ -39,6 +39,7 @@ import yaml
 # registered task name and its kwargs -- the same helpers `training.run_config` uses.
 from macrocircuits.envs import env_task, task_env_kwargs
 from macrocircuits.ncap import SwimmerModule
+from macrocircuits.reflex_steering import check_controller, make_controller
 
 
 # ==================================================================================================
@@ -84,12 +85,24 @@ class NCAPSwimmerPolicy(nn.Module):
     the RL actor it does not read a timestep feature from the observation; the head
     oscillator instead advances the module's own step counter, which `reset()` zeroes
     at the start of each rollout.
+
+    `controller` is an optional steering reflex (see `reflex_steering`), which reads
+    the task's egocentric to_target / to_obstacle vector out of the same observation
+    and drives the circuit's turn inputs with it -- the ES counterpart of what
+    `ncap.SwimmerActor` does for the RL path. It adds no parameters: the reflex is
+    fixed, and only the circuit's own `bneuron_turn` weight is evolved. The vector it
+    reads is in raw task units on both paths -- tonic normalizes inside its observation
+    encoders, which `SwimmerActor` does not use -- so a reflex tuned on one (e.g.
+    `make_obstacle_avoidance_reflex`'s `reaction_distance`) behaves the same on the other.
     """
 
-    def __init__(self, n_joints, **swimmer_kwargs):
+    def __init__(self, n_joints, controller=None, **swimmer_kwargs):
         super().__init__()
         self.n_joints = n_joints
-        self.swimmer = SwimmerModule(n_joints=n_joints, **swimmer_kwargs)
+        self.controller = controller
+        self.swimmer = SwimmerModule(
+            n_joints=n_joints, include_turn_control=(controller is not None), **swimmer_kwargs
+        )
         self._joint_limit = 2 * np.pi / (n_joints + 1)  # As in dm_control (uses n_bodies).
 
     def reset(self):
@@ -98,9 +111,19 @@ class NCAPSwimmerPolicy(nn.Module):
     def forward(self, observations):
         joint_pos = observations[..., :self.n_joints]
         joint_pos = torch.clamp(joint_pos / self._joint_limit, min=-1.0, max=1.0)
+        right, left, speed = (
+            self.controller(observations) if self.controller else (None, None, None)
+        )
         # timesteps=None -> use the module's internal counter for the oscillator;
         # log_activity=False -> don't accumulate connection records across the run.
-        return self.swimmer(joint_pos, timesteps=None, log_activity=False)
+        return self.swimmer(
+            joint_pos,
+            timesteps=None,
+            right_control=right,
+            left_control=left,
+            speed_control=speed,
+            log_activity=False,
+        )
 
 
 class MLPSwimmerPolicy(nn.Module):
@@ -336,6 +359,7 @@ def es_config(
     n_links=6,
     task='swim',
     task_kwargs=None,
+    controller=None,
     generations=100,
     population_size=64,
     sigma=0.02,
@@ -364,6 +388,7 @@ def es_config(
         n_links=n_links,
         task=task,
         task_kwargs=task_kwargs,
+        controller=controller,
         n_steps=generations,
         population_size=population_size,
         sigma=sigma,
@@ -383,6 +408,7 @@ def is_es_trained(
     n_links=6,
     task='swim',
     task_kwargs=None,
+    controller=None,
     population_size=64,
     sigma=0.02,
     lr=0.02,
@@ -417,6 +443,7 @@ def is_es_trained(
         # Defaulted to {} rather than None so a run saved before task_kwargs existed
         # still matches a plain run and is not needlessly retrained.
         and saved.get('task_kwargs', {}) == task_env_kwargs(task, n_links, task_kwargs)
+        and saved.get('controller') == controller
         and saved.get('population_size') == population_size
         and saved.get('sigma') == sigma
         and saved.get('lr') == lr
@@ -429,10 +456,19 @@ def is_es_trained(
     )
 
 
-def make_es_policy(network, agent, hidden_sizes=(64, 64), swimmer_kwargs=None):
-    """Build the ES policy for `network` ('ncap' or 'mlp'), sized from `agent`."""
+def make_es_policy(network, agent, hidden_sizes=(64, 64), swimmer_kwargs=None, controller=None):
+    """Build the ES policy for `network` ('ncap' or 'mlp'), sized from `agent`.
+
+    `controller` names a steering reflex to plug into NCAP's turn inputs; the MLP
+    baseline has none, and `check_controller` (called by run_es) rejects that pairing
+    before it gets here.
+    """
     if network == 'ncap':
-        return NCAPSwimmerPolicy(n_joints=agent.action_size, **(swimmer_kwargs or {}))
+        return NCAPSwimmerPolicy(
+            n_joints=agent.action_size,
+            controller=make_controller(controller, agent.action_size),
+            **(swimmer_kwargs or {}),
+        )
     if network == 'mlp':
         return MLPSwimmerPolicy(agent.observation_size, agent.action_size, hidden_sizes=hidden_sizes)
     raise ValueError(f"network must be 'mlp' or 'ncap', got {network!r}")
@@ -481,6 +517,7 @@ def run_es(
     network='ncap',
     n_links=6,
     task='swim',
+    controller=None,
     population_size=64,
     sigma=0.02,
     lr=0.02,
@@ -505,20 +542,27 @@ def run_es(
     hold the results.
 
     Parameters mirror `training.run_config` where they overlap (`network`, `n_links`,
-    `task`); the rest are ES hyperparameters. `n_evals` averages several rollouts per
-    candidate to reduce fitness noise; `swimmer_kwargs` is forwarded to the NCAP
-    `SwimmerModule` (e.g. `oscillator_period`), `task_kwargs` to the dm_control task
+    `task`, `controller`); the rest are ES hyperparameters. `n_evals` averages several
+    rollouts per candidate to reduce fitness noise; `swimmer_kwargs` is forwarded to the
+    NCAP `SwimmerModule` (e.g. `oscillator_period`), `task_kwargs` to the dm_control task
     (e.g. `n_obstacles` on 'evasion', or `time_limit`).
 
-    Note that ES has no `controller` knob: the RL reflexes steer NCAP through
-    `SwimmerActor`, which the ES policy does not use, so on the target/obstacle tasks
-    the ES circuit swims unsteered and only its reward changes.
+    `controller` plugs a steering reflex into NCAP on the target/obstacle tasks, exactly
+    as on the RL path -- see `NCAPSwimmerPolicy`. Without one the circuit swims
+    unsteered there, so only its reward changes and not its behaviour.
     """
+    check_controller(controller, network, task)
     env_name = env_task(task, n_links)
     env_kwargs = task_env_kwargs(task, n_links, task_kwargs)
 
     agent = SwimmerESAgent(task=env_name, n_evals=n_evals, seed=seed, task_kwargs=env_kwargs)
-    policy = make_es_policy(network, agent, hidden_sizes=hidden_sizes, swimmer_kwargs=swimmer_kwargs)
+    policy = make_es_policy(
+        network,
+        agent,
+        hidden_sizes=hidden_sizes,
+        swimmer_kwargs=swimmer_kwargs,
+        controller=controller,
+    )
     es = EvolutionStrategy(
         policy,
         agent,
@@ -547,6 +591,7 @@ def run_es(
             'best_reward': es.best_reward,
             # Saved so play_es_model() can rebuild the exact policy and environment.
             'task_kwargs': env_kwargs,
+            'controller': controller,
             'swimmer_kwargs': dict(swimmer_kwargs or {}),
         }
         _save_es_run(
@@ -586,6 +631,7 @@ def play_es_model(path, camera_id=0, width=640, height=480, fps=60):
         agent,
         hidden_sizes=tuple(config.get('hidden_sizes') or (64, 64)),
         swimmer_kwargs=config.get('swimmer_kwargs'),
+        controller=config.get('controller'),
     )
     checkpoint = os.path.join(path, 'checkpoints', 'best.pt')
     policy.load_state_dict(torch.load(checkpoint, map_location='cpu'))

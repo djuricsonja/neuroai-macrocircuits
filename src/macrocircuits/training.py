@@ -17,9 +17,12 @@ from macrocircuits.envs import TASKS as _TASKS, env_task, task_env_kwargs
 from macrocircuits.es import es_run_path
 from macrocircuits.video import display_video
 
-# Imported for the same reason as the model factories below: run_config() can name one
-# of these inside the agent string, so it has to resolve when that string is eval'd.
+# make_*_reflex are imported for the same reason as the model factories below:
+# run_config() can name one of them inside the agent string, so it has to resolve when
+# that string is eval'd. CONTROLLERS is the table it names them from.
 from macrocircuits.reflex_steering import (
+    CONTROLLERS as _CONTROLLERS,
+    check_controller,
     make_foraging_reflex,
     make_obstacle_avoidance_reflex,
 )
@@ -92,14 +95,6 @@ _RL_AGENTS = {
 # so is trained by macrocircuits.es.run_es rather than train(). See es_config().
 _METHODS = (*_RL_AGENTS, 'es')
 
-# Non-learned steering reflexes (macrocircuits.reflex_steering) a run may plug into
-# NCAP's turn inputs, instead of learning that mapping with a network. Each maps the
-# run's `controller` name onto the factory run_config() names in the agent string, and
-# the tasks whose observation layout that reflex slices (see envs.TASKS).
-_CONTROLLERS = {
-    'foraging': ('make_foraging_reflex', ('foraging', 'swim_to_ball')),
-    'obstacle_avoidance': ('make_obstacle_avoidance_reflex', ('evasion',)),
-}
 
 
 # Every key a run dict may set, and the value used when it does not set it. A run is
@@ -114,10 +109,10 @@ _RUN_DEFAULTS = {
     'seed': 0,
     'task': 'swim',  # which environment to train in; see envs.TASKS.
     'task_kwargs': None,  # dm_control task options, e.g. dict(n_obstacles=10).
+    'controller': None,  # non-learned steering reflex for NCAP; see reflex_steering.
     'swimmer_kwargs': None,  # NCAP circuit options, e.g. dict(oscillator_period=60).
     'label': None,
     # -- tonic RL methods only ('ppo', 'a2c', 'trpo', 'ddpg', 'd4pg') --
-    'controller': None,  # non-learned steering reflex for NCAP; see _CONTROLLERS.
     'actor_sizes': (256, 256),
     'critic_sizes': (256, 256),
     'action_noise': 0.1,
@@ -138,7 +133,7 @@ _RUN_DEFAULTS = {
 # Keys each family ignores. resolve_runs() rejects a run that sets one its method will
 # never read, so a knob that would silently do nothing fails loudly instead.
 _RL_ONLY_KEYS = frozenset({
-    'controller', 'actor_sizes', 'critic_sizes', 'action_noise', 'gradient_clip',
+    'actor_sizes', 'critic_sizes', 'action_noise', 'gradient_clip',
     'steps', 'epoch_steps', 'save_steps',
 })
 _ES_ONLY_KEYS = frozenset({
@@ -315,23 +310,7 @@ def run_config(
     env_kwargs = task_env_kwargs(task, n_links, task_kwargs)
     n_joints = n_links - 1
 
-    if controller is not None:
-        if controller not in _CONTROLLERS:
-            raise ValueError(
-                f'controller must be None or one of {sorted(_CONTROLLERS)}, got {controller!r}'
-            )
-        if network != 'ncap':
-            raise ValueError(
-                f'controller={controller!r} steers NCAP\'s turn inputs, which the '
-                f"{network!r} baseline does not have; drop it or use network='ncap'."
-            )
-        reflex, reflex_tasks = _CONTROLLERS[controller]
-        if task not in reflex_tasks:
-            raise ValueError(
-                f'controller={controller!r} reads the {_TASKS[reflex_tasks[0]]!r} vector '
-                f'that {sorted(reflex_tasks)} add to the observation, but this run is on '
-                f'task={task!r}.'
-            )
+    check_controller(controller, network, task)
 
     # Extra SwimmerModule options, spelled out inside the factory call (NCAP only).
     swimmer_args = ''.join(f', {key}={value!r}' for key, value in (swimmer_kwargs or {}).items())
