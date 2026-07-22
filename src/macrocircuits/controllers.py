@@ -37,7 +37,12 @@ from macrocircuits.reflex_steering import (
 # Learned controllers.
 
 def foraging_state(observations, n_joints):
-    """Joint angles plus the head-egocentric [forward, lateral] vector to the food.
+    """Joint angles plus the head-egocentric [lateral, longitudinal] vector to the food.
+
+    Component 0 is left/right and component 1 is forward/backward (forward is -y):
+    the nose sits on the head's -y axis, so y is the body's long axis. An MLP sees
+    both components, so it is unaffected by the ordering -- but the fixed reflexes
+    in `reflex_steering` slice a specific one, and so does NCAP's steering motif.
 
     Assumes observation layout: joints, to_target, body_velocities -- i.e. a task with
     enable_foraging (or enable_single_target) on and enable_obstacles off.
@@ -48,8 +53,8 @@ def foraging_state(observations, n_joints):
 
 
 def obstacle_state(observations, n_joints):
-    """Joint angles plus the head-egocentric [forward, lateral] vector to the nearest
-    obstacle.
+    """Joint angles plus the head-egocentric [lateral, longitudinal] vector to the
+    nearest obstacle (same axis convention as `foraging_state`).
 
     Assumes observation layout: joints, to_obstacle, body_velocities -- i.e. a task with
     enable_obstacles on and enable_foraging off.

@@ -122,6 +122,7 @@ class Swim(swimmer.Swimmer):
         obstacle_safe_distance=0.4,
         obstacle_min_distance=0.5,
         food_size=0.02,
+        target_distance=None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -135,6 +136,42 @@ class Swim(swimmer.Swimmer):
         self._obstacle_safe_distance = obstacle_safe_distance
         self._obstacle_min_distance = obstacle_min_distance
         self._food_size = food_size
+        self._target_distance = target_distance
+
+    def _place_target(self, physics, around=None):
+        """Reposition the target; `around` is the (x, y) to place it relative to.
+
+        With `target_distance` set, the target goes at exactly that distance and a
+        uniformly random bearing -- around the origin at episode start, around the
+        worm's nose when a pellet respawns.
+
+        Fixing the distance makes every episode a comparable navigation problem.
+        dm_control's stock spawn samples a +/-2.0 box and, 20% of the time, a
+        +/-0.3 one, so steering is irrelevant when the target lands almost on top
+        of the worm and near-hopeless when it lands far away; its benefit is
+        diluted across episodes. Measured on swim_to_ball, pinning the distance
+        raised the steering-on vs -off effect from 41 to 141 return (SNR 0.47 ->
+        1.41) -- almost entirely by growing the effect, not by cutting variance.
+
+        The bearing stays uniformly random and the worm's heading is randomised by
+        dm_control, so the egocentric angle is still fully random: the worm has to
+        read the target vector and cannot settle on a fixed world heading. This is
+        a training curriculum -- evaluate on the stock spawn (target_distance=None)
+        to check that the learned steering generalises.
+        """
+        if self._target_distance is not None:
+            angle = self.random.uniform(0, 2 * np.pi)
+            origin_x, origin_y = (0.0, 0.0) if around is None else (around[0], around[1])
+            xpos = origin_x + self._target_distance * np.cos(angle)
+            ypos = origin_y + self._target_distance * np.sin(angle)
+        elif around is None:
+            return  # keep dm_control's own episode-start placement
+        else:
+            xpos, ypos = self.random.uniform(-1.5, 1.5, size=2)
+        physics.named.model.geom_pos['target', 'x'] = xpos
+        physics.named.model.geom_pos['target', 'y'] = ypos
+        physics.named.model.light_pos['target_light', 'x'] = xpos
+        physics.named.model.light_pos['target_light', 'y'] = ypos
 
     def initialize_episode(self, physics):
         # disabled = bool(physics.model.opt.disableflags & mujoco.mjtDisableBit.mjDSBL_CONTACT)
@@ -146,12 +183,20 @@ class Swim(swimmer.Swimmer):
             super(Swim, self).initialize_episode(physics)
             if self._enable_foraging:
                 physics.named.model.geom_size['target', 0] = self._food_size
+            self._place_target(physics)  # no-op unless target_distance is set
         else:
             super().initialize_episode(physics)
             physics.named.model.mat_rgba['target', 'a'] = 0
             physics.named.model.mat_rgba['target_default', 'a'] = 0
             physics.named.model.mat_rgba['target_highlight', 'a'] = 0
-
+        # Initialize last-target distance for approach reward tracking.
+        if self._enable_foraging or self._enable_single_target:
+            # forward() so geom_xpos reflects both the randomised pose and any
+            # target we just moved, before the distance is read off it.
+            physics.forward()
+            self._last_target_dist = float(physics.nose_to_target_dist())
+        else:
+            self._last_target_dist = None
         # print(f"All Body Psotions: {self.all_body_positions(physics)}")
         # print(f"Observation: {self.get_observation(physics)}")
 
@@ -174,6 +219,15 @@ class Swim(swimmer.Swimmer):
         obs['joints'] = physics.joints()
         if self._enable_foraging or self._enable_single_target:
             obs['to_target'] = physics.nose_to_target()
+            # scalar distance to target (head-centric). Keep as a 1-d array so
+            # downstream code can slice predictably: [forward, lateral], dist
+            try:
+                dist = physics.nose_to_target_dist()
+            except Exception:
+                # fall back if API differs
+                vec = physics.nose_to_target()
+                dist = np.linalg.norm(vec)
+            obs['to_target_dist'] = np.array([dist])
         if self._enable_obstacles:
             vector, _ = physics.nearest_obstacle(self._n_obstacles)
             obs['to_obstacle'] = vector
@@ -181,14 +235,20 @@ class Swim(swimmer.Swimmer):
         return obs
 
     def get_reward(self, physics):
-        forward_velocity = -physics.named.data.sensordata['head_vel'][1]
-        reward = rewards.tolerance(
-            forward_velocity,
-            bounds=(self._desired_speed, float('inf')),
-            margin=self._desired_speed,
-            value_at_margin=0.,
-            sigmoid='linear',
-        )
+        # When foraging or single-target tasks are enabled, we disable
+        # the forward-speed reward so the agent focuses on food-related
+        # objectives instead of purely maximizing speed.
+        if not (self._enable_foraging or self._enable_single_target):
+            forward_velocity = -physics.named.data.sensordata['head_vel'][1]
+            reward = rewards.tolerance(
+                forward_velocity,
+                bounds=(self._desired_speed, float('inf')),
+                margin=self._desired_speed,
+                value_at_margin=0.,
+                sigmoid='linear',
+            )
+        else:
+            reward = 0.0
 
         if self._enable_single_target:
             target_size = physics.named.model.geom_size['target', 0]
@@ -202,16 +262,35 @@ class Swim(swimmer.Swimmer):
         if self._enable_foraging:
             target_size = physics.named.model.geom_size['target', 0]
             dist = physics.nose_to_target_dist()
+            # Dense approach reward: the *signed* change in distance, so it is a
+            # proper potential-based shaping term that telescopes to the total
+            # distance closed over the episode. Clamping this at 0 (as it was)
+            # rewards every decrease but penalises no increase, so a worm that
+            # merely oscillates toward and away accumulates reward with zero net
+            # progress -- it pays for wiggling rather than for navigating.
+            if getattr(self, '_last_target_dist', None) is not None:
+                approach = self._last_target_dist - float(dist)
+                reward += self._target_reward_weight * approach
+            self._last_target_dist = float(dist)
+
+            # Existing proximity-shaped reward (kept for stability).
             reward += self._target_reward_weight * rewards.tolerance(
                 dist,
                 bounds=(0, target_size),
                 margin=5 * target_size,
                 sigmoid='long_tail',
             )
+
+            # Arrival bonus and respawn when food reached.
             if dist < target_size:  # worm reached the food -- respawn it
-                xpos, ypos = self.random.uniform(-1.5, 1.5, size=2)
-                physics.named.model.geom_pos['target', 'x'] = xpos
-                physics.named.model.geom_pos['target', 'y'] = ypos
+                reward += self._target_reward_weight * 1.0
+                self._place_target(physics, around=physics.named.data.geom_xpos['nose'][:2])
+                physics.forward()
+                # Re-baseline against the *new* target. Without this the next
+                # step's signed approach term is (old ~0 distance) - (new far
+                # distance): a large penalty for the very act of eating. This was
+                # masked while the term was clamped at 0, but not once it is signed.
+                self._last_target_dist = float(physics.nose_to_target_dist())
 
         if self._enable_obstacles:
             _, dist = physics.nearest_obstacle(self._n_obstacles)
@@ -266,11 +345,17 @@ def swim_to_ball(
     enable_foraging=False,
     enable_obstacles=False,
     n_obstacles=3,
+    target_distance=None,
     time_limit=swimmer._DEFAULT_TIME_LIMIT,
     random=None,
     environment_kwargs={},
 ):
-    """Returns the Swim task, with optional foraging and obstacle avoidance."""
+    """Returns the Swim task, with optional foraging and obstacle avoidance.
+
+    target_distance: pin the target to this distance at a random bearing instead
+    of dm_control's random box spawn -- see Swim._place_target. None keeps the
+    stock behaviour, which is what a generalisation check should evaluate on.
+    """
     model_string, assets = get_model_and_assets(
         n_links, n_obstacles=n_obstacles if enable_obstacles else 0
     )
@@ -281,6 +366,7 @@ def swim_to_ball(
         enable_foraging=enable_foraging,
         enable_obstacles=enable_obstacles,
         n_obstacles=n_obstacles,
+        target_distance=target_distance,
         random=random,
     )
     return control.Environment(
@@ -297,11 +383,17 @@ def foraging(
     enable_foraging=True,
     enable_obstacles=False,
     n_obstacles=3,
+    target_distance=None,
     time_limit=swimmer._DEFAULT_TIME_LIMIT,
     random=None,
     environment_kwargs={},
 ):
-    """Returns the Swim task, with optional foraging and obstacle avoidance."""
+    """Returns the Swim task, with optional foraging and obstacle avoidance.
+
+    target_distance: pin each pellet to this distance at a random bearing (from
+    the worm's nose on respawn) instead of dm_control's random box spawn -- see
+    Swim._place_target. None keeps the stock behaviour.
+    """
     model_string, assets = get_model_and_assets(
         n_links, n_obstacles=n_obstacles if enable_obstacles else 0
     )
@@ -312,6 +404,7 @@ def foraging(
         enable_foraging=enable_foraging,
         enable_obstacles=enable_obstacles,
         n_obstacles=n_obstacles,
+        target_distance=target_distance,
         random=random,
     )
     return control.Environment(

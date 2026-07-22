@@ -118,11 +118,18 @@ class NCAPSwimmerPolicy(nn.Module):
         right, left, speed = (
             self.controller(observations) if self.controller else (None, None, None)
         )
+        # Head-egocentric [forward, lateral] vector to the target sits just after
+        # the joints in the flattened observation; only read when steering is on.
+        if getattr(self.swimmer, 'include_target_steering', False):
+            target_vec = observations[..., self.n_joints:self.n_joints + 2]
+        else:
+            target_vec = None
         # timesteps=None -> use the module's internal counter for the oscillator;
         # log_activity=False -> don't accumulate connection records across the run.
         return self.swimmer(
             joint_pos,
             timesteps=None,
+            target_vec=target_vec,
             right_control=right,
             left_control=left,
             speed_control=speed,

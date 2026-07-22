@@ -20,21 +20,56 @@ def show_paper_figure():
     display(Image(url=NCAP_PAPER_FIGURE_URL))
 
 
-def plot_performance(paths, ax=None, title='Model Performance'):
+# Running totals each x-axis can be read from, in priority order, with its axis label.
+_X_AXES = {
+    'steps': (('train/steps', 'total_env_steps'), 'Environment Steps'),
+    'episodes': (('train/episodes',), 'Episodes'),
+}
+
+
+def _x_axis(df, x, path):
+    """Running total to plot a run against.
+
+    Tonic logs both counters directly (`train/steps`, `train/episodes`); ES logs steps as
+    `total_env_steps` (see `es._save_es_run`) and has no episode counter at all, so an
+    episode axis is refused rather than faked. Only when no step counter is present do we
+    fall back to accumulating `test/episode_length/mean`, which is a true per-row step
+    delta for ES but NOT for tonic -- there it is the fixed time-limit length (1000), so
+    the fallback would silently rescale a 500k-step run onto a 25k-step axis.
+    """
+    for column in _X_AXES[x][0]:
+        if column in df.columns:
+            return df[column]
+    if x == 'episodes':
+        raise ValueError(f"{path} logs no episode counter; plot it with x='steps'")
+    return np.cumsum(df['test/episode_length/mean'])
+
+
+def plot_performance(paths, ax=None, title='Model Performance', x='steps', band=True):
     """
     Plots the performance of multiple models on the same axes using Seaborn for styling.
 
-    Reads CSV log files from specified paths and plots the mean episode scores
-    achieved during testing against the cumulative time steps for each model.
-    The plot uses a logarithmic scale for the x-axis to better display the progression
-    over a wide range of steps. Each line's legend is set to the name of the last folder
-    in the path, representing the model's name. Seaborn styles are applied for enhanced visualization.
+    Reads CSV log files from specified paths and plots the mean test episode score
+    against training progress, for each model. Each line's legend is set to the name of
+    the last folder in the path, representing the model's name.
+
+    Test scores are averaged over only a handful of episodes per evaluation, so a bare
+    mean line is mostly sampling noise; `band` shades mean +/- std around it (where the
+    log records one) to keep that spread visible rather than reading it as learning.
 
     Parameters:
     - paths (list of str): Paths to the experiment directories.
     - ax (matplotlib.axes.Axes, optional): A matplotlib axis object to plot on. If None,
       a new figure and axis are created.
+    - x (str): Training progress measure for the x-axis -- 'steps' (environment steps) or
+      'episodes' (episodes trained on). ES runs log no episode counter and so support
+      only 'steps'.
+    - band (bool): Shade mean +/- std of the test episode score. Ignored for logs
+      without a `test/episode_score/std` column (ES runs log a running best, not a mean).
     """
+    if x not in _X_AXES:
+        raise ValueError(f'x must be one of {sorted(_X_AXES)}, got {x!r}')
+
     # Set the Seaborn style
     sns.set(style="whitegrid")
     colors = sns.color_palette("colorblind")  # Colorblind-friendly palette
@@ -45,19 +80,61 @@ def plot_performance(paths, ax=None, title='Model Performance'):
     for index, path in enumerate(paths):
         # Extract the model name from the path
         model_name = os.path.basename(path.rstrip('/'))
+        color = colors[index % len(colors)]
 
         # Load data
         df = pd.read_csv(os.path.join(path, 'log.csv'))
         scores = df['test/episode_score/mean']
-        lengths = df['test/episode_length/mean']
-        steps = np.cumsum(lengths)
-        sns.lineplot(x=steps, y=scores, ax=ax, label=model_name, color=colors[index % len(colors)])
+        progress = _x_axis(df, x, path)
+        ax.plot(progress, scores, label=model_name, color=color)
+        if band and 'test/episode_score/std' in df.columns:
+            spread = df['test/episode_score/std']
+            ax.fill_between(progress, scores - spread, scores + spread, color=color, alpha=0.2)
 
-    ax.set_xscale('log')
-    ax.set_xlabel('Cumulative Time Steps')
-    ax.set_ylabel('Max Episode Score')
+    ax.set_xlabel(_X_AXES[x][1])
+    # Each point totals the rewards of one episode ('score' in tonic's terms, see
+    # utils/trainer.py); the averaging is across the handful of test episodes per
+    # evaluation, NOT within an episode. 'Mean Episode Score' read as reward-per-step.
+    ax.set_ylabel('Total Episode Reward (mean of test episodes)')
     ax.legend()
     ax.set_title(title)
+
+
+def runs_by_reward(paths, key='best', min_reward=None, top=None):
+    """Experiment run directories ranked (and optionally filtered) by achieved reward.
+
+    Reads each path's log.csv -- the same file plot_performance() plots -- and scores
+    it from the test/episode_score/mean column:
+    - 'best': the highest value logged over the whole run.
+    - 'last': the value at the run's most recent logged epoch.
+
+    Paths with no log.csv (not yet trained past the first epoch) are skipped rather
+    than raising, so a run directory tree with in-progress runs can be scanned as-is.
+
+    Parameters:
+    - paths (list of str): Paths to the experiment directories (e.g. from run_path()).
+    - key (str): 'best' or 'last'; see above.
+    - min_reward (float, optional): Drop runs scoring below this reward.
+    - top (int, optional): Keep only the top-scoring `top` runs.
+
+    Returns a list of (path, reward) tuples sorted by reward, descending.
+    """
+    if key not in ('best', 'last'):
+        raise ValueError(f"key must be 'best' or 'last', got {key!r}")
+
+    scored = []
+    for path in paths:
+        log_path = os.path.join(path, 'log.csv')
+        if not os.path.isfile(log_path):
+            continue
+        scores = pd.read_csv(log_path)['test/episode_score/mean']
+        reward = float(scores.max() if key == 'best' else scores.iloc[-1])
+        if min_reward is not None and reward < min_reward:
+            continue
+        scored.append((path, reward))
+
+    scored.sort(key=lambda item: item[1], reverse=True)
+    return scored[:top] if top is not None else scored
 
 
 def draw_network(mode='NCAP', N=2, include_speed_control=False, include_turn_control=False):

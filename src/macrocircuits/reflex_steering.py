@@ -18,10 +18,12 @@ def make_foraging_reflex(n_joints):
 
     Assumes observation layout: joints, to_target, ... (see Swim.get_observation).
     """
-    target_slice = slice(n_joints, n_joints + 2)  # [forward, lateral], head-egocentric
+    target_slice = slice(n_joints, n_joints + 2)  # [lateral, longitudinal], head-egocentric
 
     def reflex(observations):
-        lateral = observations[..., target_slice][..., 1, None]
+        # Component 0 is the lateral (left/right) axis: the nose sits on the
+        # head's -y axis, so y is the body's long axis and x is lateral.
+        lateral = observations[..., target_slice][..., 0, None]
         right = lateral.clamp(min=0, max=1)    # food's to my right -> turn right
         left = (-lateral).clamp(min=0, max=1)  # food's to my left -> turn left
         speed = torch.ones_like(right)
@@ -40,8 +42,8 @@ def make_obstacle_avoidance_reflex(n_joints, reaction_distance=0.6):
     obstacle_slice = slice(n_joints, n_joints + 2)
 
     def reflex(observations):
-        to_obstacle = observations[..., obstacle_slice]  # [forward, lateral]
-        lateral = to_obstacle[..., 1, None]
+        to_obstacle = observations[..., obstacle_slice]  # [lateral, longitudinal]
+        lateral = to_obstacle[..., 0, None]  # component 0 is left/right (see foraging reflex)
         distance = torch.norm(to_obstacle, dim=-1, keepdim=True)
 
         # 1 when right on top of the obstacle, 0 once farther than reaction_distance.
