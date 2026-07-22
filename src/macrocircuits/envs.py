@@ -115,6 +115,7 @@ class Swim(swimmer.Swimmer):
         desired_speed=_SWIM_SPEED,
         enable_single_target=False,
         enable_foraging=False,
+        enable_foraging_exp=False,
         enable_obstacles=False,
         n_obstacles=3,
         target_reward_weight=1.0,
@@ -122,12 +123,16 @@ class Swim(swimmer.Swimmer):
         obstacle_safe_distance=0.4,
         obstacle_min_distance=0.5,
         food_size=0.02,
+        conc_at_source = 100,
+        decay_len = 10,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self._desired_speed = desired_speed
         self._enable_single_target = enable_single_target
         self._enable_foraging = enable_foraging
+        self._enable_foraging_exp= enable_foraging_exp
+
         self._enable_obstacles = enable_obstacles
         self._n_obstacles = n_obstacles if enable_obstacles else 0
         self._target_reward_weight = target_reward_weight
@@ -135,12 +140,14 @@ class Swim(swimmer.Swimmer):
         self._obstacle_safe_distance = obstacle_safe_distance
         self._obstacle_min_distance = obstacle_min_distance
         self._food_size = food_size
+        self._conc_at_source = conc_at_source
+        self._decay_len = decay_len
 
     def initialize_episode(self, physics):
         # disabled = bool(physics.model.opt.disableflags & mujoco.mjtDisableBit.mjDSBL_CONTACT)
         # print('contact globally disabled:', disabled)
 
-        if self._enable_foraging or self._enable_single_target:
+        if self._enable_foraging or self._enable_single_target or self._enable_foraging_exp:
             # Skip Swim's target-hiding step; call the grandparent (stock Swimmer)
             # directly so the target is randomly placed AND stays visible.
             super(Swim, self).initialize_episode(physics)
@@ -208,6 +215,15 @@ class Swim(swimmer.Swimmer):
                 margin=5 * target_size,
                 sigmoid='long_tail',
             )
+            if dist < target_size:  # worm reached the food -- respawn it
+                xpos, ypos = self.random.uniform(-1.5, 1.5, size=2)
+                physics.named.model.geom_pos['target', 'x'] = xpos
+                physics.named.model.geom_pos['target', 'y'] = ypos
+        if self._enable_foraging_exp:
+            target_size = physics.named.model.geom_size['target', 0]
+            dist = physics.nose_to_target_dist()
+            reward += self._conc_at_source * np.exp(-dist / self._decay_len)
+            
             if dist < target_size:  # worm reached the food -- respawn it
                 xpos, ypos = self.random.uniform(-1.5, 1.5, size=2)
                 physics.named.model.geom_pos['target', 'x'] = xpos
