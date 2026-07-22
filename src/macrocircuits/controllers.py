@@ -34,6 +34,68 @@ from macrocircuits.reflex_steering import (
 
 
 # ==================================================================================================
+# Biologically Inspired controllers.
+def distance_to_food_target(observations, n_joints):
+    to_target = observations[..., n_joints:n_joints + 2]
+    return torch.norm(to_target, dim=-1)
+
+class NaivePiouretteController(nn.Module):
+
+    def __init__(self, n_joints, state_fn=distance_to_food_target, tau=20):
+        super().__init__()
+        self.tau = tau
+        self.counter = 0
+        self.n_joints = n_joints
+        self.state_fn = state_fn
+        self.register_buffer(
+            "concentration",
+            torch.zeros((2,)),
+            persistent=True
+        )
+        self.register_buffer(
+            "controls",
+            torch.tensor([0.0, 0.0, 1.0]),  # start swimming straight, not stalled
+            persistent=True
+        )
+        self.dist = torch.distributions.Uniform(0.0, 1.0)
+
+    def forward(self, observations, n_joints=None):
+        to_target = self.state_fn(observations, self.n_joints)
+        # concentration proxy: negative distance, so higher = closer to food
+        x = -torch.norm(to_target, dim=-1)
+        if x.dim() > 0:
+            x = x[-1]
+
+        with torch.no_grad():
+            if (self.counter == 0) or (self.counter < (self.tau - 1)):
+                if self.counter == 0:
+                    self.concentration[0] = x
+                self.counter += 1
+            else:
+                self.concentration[1] = x
+                conc_gradient = self.concentration[1] - self.concentration[0]
+
+                if conc_gradient < 0:
+                    # concentration decreasing (getting farther) -> pirouette:
+                    # pick a single turn direction and magnitude, keep speed fixed
+                    magnitude = self.dist.sample((1,))
+                    go_right = torch.rand(1) < 0.5
+                    left = torch.where(go_right, torch.zeros(1), magnitude)
+                    right = torch.where(go_right, magnitude, torch.zeros(1))
+                    speed = torch.ones(1)
+                    self.controls = torch.cat([left, right, speed])
+                # else: concentration flat/increasing -> keep current heading (run)
+
+                self.counter = 0
+
+            left, right, speed = self.controls
+            return left, right, speed
+        
+def make_foraging_naive_piourette(n_joints, tau=10):
+    return NaivePiouretteController(n_joints, state_fn=distance_to_food_target, tau=tau)
+
+
+# ==================================================================================================
 # Learned controllers.
 
 def foraging_state(observations, n_joints):
@@ -61,7 +123,7 @@ def obstacle_state(observations, n_joints):
 
 class MLPController(nn.Module):
     """Learns the sensed-vector -> steering-command mapping the reflexes hand-derive.
-
+istance_to_food_target
     `state_fn` slices the inputs out of the raw observation (which is why the controller
     needs `n_joints`), and the head outputs `right`, `left`, `speed`, squashed to [0, 1]
     to match the range the circuit's turn inputs expect.
@@ -112,6 +174,7 @@ CONTROLLERS = {
     'obstacle_avoidance': ('make_obstacle_avoidance_reflex', ('evasion',)),
     'mlp_foraging': ('make_foraging_mlp', ('foraging', 'swim_to_ball')),
     'mlp_obstacle_avoidance': ('make_obstacle_avoidance_mlp', ('evasion',)),
+    'naive_piourette_foraging': ('make_foraging_naive_piourette', ('foraging', 'swim_to_ball'))
 }
 
 

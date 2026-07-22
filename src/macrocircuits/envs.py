@@ -182,7 +182,7 @@ class Swim(swimmer.Swimmer):
 
     def get_reward(self, physics):
         forward_velocity = -physics.named.data.sensordata['head_vel'][1]
-        reward = rewards.tolerance(
+        reward = 0 * rewards.tolerance(
             forward_velocity,
             bounds=(self._desired_speed, float('inf')),
             margin=self._desired_speed,
