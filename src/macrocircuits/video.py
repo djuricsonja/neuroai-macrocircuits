@@ -1,5 +1,6 @@
 """Writing rollout frames to video files and displaying them in a notebook."""
 
+import base64
 import os
 import typing as T
 
@@ -81,23 +82,20 @@ def display_video(
     filepath = os.path.abspath(filename)
     write_video(filepath, frames, fps=fps, verbose=False, **kwargs)
 
+    # Embed the file just written directly as an HTML5 <video> tag, via base64. This
+    # is what matplotlib's FuncAnimation.to_html5_video() also does under the hood --
+    # but that path re-renders and re-encodes every frame a *second* time through
+    # matplotlib's own animation writer first, which scales badly with frame count:
+    # confirmed directly, a 2000-frame video's write_video call above finished in a
+    # couple of minutes, then the matplotlib re-encode alone ran past 15 minutes
+    # before a notebook execution timeout killed it -- for a video that had already
+    # been sitting on disk, fully written, the whole time. Reading the bytes already
+    # on disk skips that redundant pass entirely.
     height, width, _ = frames[0].shape
-    dpi = 70
-    orig_backend = matplotlib.get_backend()
-    matplotlib.use('Agg')  # Switch to headless 'Agg' to inhibit figure rendering.
-    fig, ax = plt.subplots(1, 1, figsize=(width / dpi, height / dpi), dpi=dpi)
-    matplotlib.use(orig_backend)  # Switch back to the original backend.
-    ax.set_axis_off()
-    ax.set_aspect('equal')
-    ax.set_position([0, 0, 1, 1])
-    im = ax.imshow(frames[0])
-
-    def update(frame):
-        im.set_data(frame)
-        return [im]
-
-    interval = 1000 / fps
-    anim = animation.FuncAnimation(
-        fig=fig, func=update, frames=frames, interval=interval, blit=True, repeat=False
+    with open(filepath, 'rb') as f:
+        video_b64 = base64.b64encode(f.read()).decode('ascii')
+    return HTML(
+        f'<video width="{width}" height="{height}" controls autoplay>'
+        f'<source src="data:video/mp4;base64,{video_b64}" type="video/mp4">'
+        f'</video>'
     )
-    return HTML(anim.to_html5_video())
