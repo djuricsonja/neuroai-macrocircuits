@@ -117,6 +117,7 @@ _RUN_DEFAULTS = {
     'task': 'swim',  # which environment to train in; see envs.TASKS.
     'task_kwargs': None,  # dm_control task options, e.g. dict(n_obstacles=10).
     'controller': None,  # steering controller for NCAP; see controllers.CONTROLLERS.
+    'controller_kwargs': None,  # options forwarded to the controller factory.
     'swimmer_kwargs': None,  # NCAP circuit options, e.g. dict(oscillator_period=60).
     'label': None,
     # -- tonic RL methods only ('ppo', 'a2c', 'trpo', 'ddpg', 'd4pg') --
@@ -236,6 +237,7 @@ def run_config(
     task='swim',
     task_kwargs=None,
     controller=None,
+    controller_kwargs=None,
     actor_sizes=(256, 256),
     critic_sizes=(256, 256),
     action_noise=0.1,
@@ -274,9 +276,15 @@ def run_config(
     - controller: what turns the task's sensed vector into NCAP's turn inputs
                  (network='ncap' only). Either a fixed reflex ('foraging' on the target
                  tasks, 'obstacle_avoidance' on 'evasion') or its learned MLP counterpart
-                 ('mlp_foraging', 'mlp_obstacle_avoidance'), whose weights are trained
-                 along with the circuit. None leaves the circuit unsteered, as in the
-                 paper. See macrocircuits.controllers.CONTROLLERS.
+                 ('mlp_foraging', 'mlp_obstacle_avoidance', 'learned_steering'), whose
+                 weights are trained along with the circuit. None leaves the circuit
+                 unsteered, as in the paper -- the baseline the steered runs are read
+                 against. See macrocircuits.controllers.CONTROLLERS.
+    - controller_kwargs: options forwarded to the controller factory, e.g.
+                 dict(turn_strength=0.5, hidden_size=16) for 'learned_steering' or
+                 dict(angle_gain=8.0) for 'foraging'. Spelled into the agent source
+                 string, so they are recorded in config.yaml and two runs differing only
+                 in these are correctly seen as different runs by is_trained().
     - actor_sizes/critic_sizes: MLP torso widths. NCAP's actor is the fixed circuit,
                  so actor_sizes is used by the MLP baseline only; critic_sizes applies to both.
     - action_noise: exploration std. For the on-policy methods it is the std of the NCAP
@@ -337,7 +345,12 @@ def run_config(
             # into NCAP's turn signals; the circuit's own bneuron_turn weight, still
             # learned, decides how strongly to act on them. An MLP controller is an
             # nn.Module, so SwimmerActor registers it and tonic trains it too.
-            model_args.append(f'controller={_CONTROLLERS[controller][0]}({n_joints})')
+            controller_args = ''.join(
+                f', {key}={value!r}' for key, value in (controller_kwargs or {}).items()
+            )
+            model_args.append(
+                f'controller={_CONTROLLERS[controller][0]}({n_joints}{controller_args})'
+            )
         model = f'{rl.models}_swimmer_model(' + ', '.join(model_args) + swimmer_args + ')'
         # NCAP's SwimmerActor reads observations[..., -1] as the timestep, which tonic
         # only appends when time_feature=True -- so it is required for this network.
@@ -505,7 +518,25 @@ def train(
         exec(after_training, namespace)
 
 
-def play_model(path, checkpoint='last', environment='default', seed=None, header=None):
+def _physics_of(environment):
+    """Finds the dm_control Physics inside a tonic-wrapped environment, by walking its
+    `.env` chain of gym wrappers (ActionRescaler, TimeFeature, ...) down to whichever
+    one exposes it, directly or via `.environment.physics`."""
+    obj = environment.environments[0]
+    while obj is not None:
+        if hasattr(obj, 'physics'):
+            return obj.physics
+        inner = getattr(obj, 'environment', None)
+        if inner is not None and hasattr(inner, 'physics'):
+            return inner.physics
+        obj = getattr(obj, 'env', None)
+    raise AttributeError('Could not find a dm_control Physics inside this environment')
+
+
+def play_model(
+    path, checkpoint='last', environment='default', seed=None, header=None,
+    camera_id=0, camera_fovy=None, camera_pose=None,
+):
     """
     Plays a model within an environment and renders the gameplay to a video.
 
@@ -515,6 +546,22 @@ def play_model(path, checkpoint='last', environment='default', seed=None, header
     - environment (str): The environment to use. 'default' uses the environment specified in the configuration file.
     - seed (int): Optional seed for reproducibility.
     - header (str): Optional Python code to execute before initializing the model, such as importing libraries.
+    - camera_id (int): Which camera to render from. The default (0) is a tracking shot
+      that follows the worm, with a 60 degree field of view -- fine for 'swim', but on
+      'foraging'/'evasion' the food and obstacles routinely spawn 1+ units away and fall
+      outside that narrow view, so the video can look empty with the target right there.
+      Pass -1 for the free camera framing the whole arena (it stops tracking the worm).
+    - camera_fovy (float): If set, overrides camera_id's field of view in degrees
+      (default 60) -- e.g. 90 keeps camera 0's tracking but widens it enough to keep
+      nearby food in frame.
+    - camera_pose (dict): If set, overrides camera_id/camera_fovy and renders from a
+      fixed, world-frame free camera posed by these mjvCamera fields, e.g.
+      dict(lookat=[0, 0, 0], distance=6.0, azimuth=90, elevation=-90) for a wide
+      overhead view. Worth preferring for judging *direction*: cameras 0 and 1 track the
+      worm's position but never rotate to face its heading (confirmed directly -- the
+      floor tiles hold the same screen position across frames), so a turn can read as
+      the wrong way round purely from the camera, while -1 doesn't track at all and a
+      worm that swims far enough simply leaves the frame.
     """
 
     namespace = _eval_namespace()
@@ -582,6 +629,40 @@ def play_model(path, checkpoint='last', environment='default', seed=None, header
         environment = tonic.environments.distribute(lambda: eval(environment, namespace))
     if seed is not None:
         environment.seed(seed)
+    if camera_fovy is not None:
+        _physics_of(environment).model.cam_fovy[camera_id] = camera_fovy
+
+    if camera_pose is not None:
+        from dm_control.mujoco import engine
+
+        def render_frame():
+            # A Camera is single-use -- Physics.render() itself builds a fresh one per
+            # call and frees it afterwards. Reusing one instance across a whole video's
+            # frames silently freezes it on the pose it had at construction; confirmed
+            # directly (identical frames 200 steps apart) before switching to building
+            # one per frame like this.
+            physics = _physics_of(environment)
+            # camera_id=-1 (the free camera), not the caller's camera_id: lookat /
+            # distance / azimuth / elevation are mjvCamera fields that MuJoCo only
+            # honours in free-camera mode. On a model-defined camera (0, 1) they are
+            # silently ignored and the render comes back as the ordinary tracking shot,
+            # which looks like camera_pose "not working" for no visible reason.
+            camera = engine.Camera(physics, height=480, width=640, camera_id=-1)
+            render_camera = camera._render_camera
+            for key, value in camera_pose.items():
+                target = getattr(render_camera, key)
+                if hasattr(target, '__setitem__'):
+                    target[:] = value
+                else:
+                    setattr(render_camera, key, value)
+            frame = camera.render()
+            camera._scene.free()
+            return frame
+    else:
+        def render_frame():
+            return environment.render(
+                'rgb_array', camera_id=camera_id, width=640, height=480,
+            )[0]
 
     # Initialize the agent.
     agent.initialize(
@@ -596,7 +677,7 @@ def play_model(path, checkpoint='last', environment='default', seed=None, header
 
     steps = 0
     test_observations = environment.start()
-    frames = [environment.render('rgb_array', camera_id=0, width=640, height=480)[0]]
+    frames = [render_frame()]
     score, length = 0, 0
 
     while True:
@@ -606,7 +687,7 @@ def play_model(path, checkpoint='last', environment='default', seed=None, header
 
         # Take a step in the environment.
         test_observations, infos = environment.step(actions)
-        frames.append(environment.render('rgb_array', camera_id=0, width=640, height=480)[0])
+        frames.append(render_frame())
         agent.test_update(**infos, steps=steps)
 
         score += infos['rewards'][0]

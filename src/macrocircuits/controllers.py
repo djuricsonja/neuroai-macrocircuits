@@ -9,18 +9,22 @@ vector unused unless something turns it into the circuit's `right_control` /
 | `controller=` | what steers | learned? |
 |---|---|---|
 | `None` | nothing -- the circuit swims straight, only its reward changes | -- |
-| `'foraging'` / `'obstacle_avoidance'` | a fixed reflex (`reflex_steering`) | no |
-| `'mlp_foraging'` / `'mlp_obstacle_avoidance'` | a small MLP (`MLPController`) | yes |
+| `'foraging'` / `'obstacle_avoidance'` | a fixed P+D reflex (`reflex_steering`) | no |
+| `'steer_to_food'` | a fixed proportional turn toward food | no |
+| `'turn_left'` / `'turn_right'` | a constant turn, sensor-free (an actuator test) | no |
+| `'learned_steering'` | a tiny MLP on the bearing, driving the fixed turn primitive | yes |
+| `'mlp_foraging'` / `'mlp_obstacle_avoidance'` | a small MLP on joints + vector (`MLPController`) | yes |
 
 That is the comparison the tasks exist for: how much of the steering has to be learned
-once the swimming itself is given by the architecture.
+once the swimming itself is given by the architecture -- with `None` as the floor it is
+all measured against.
 
-All three are the same shape to the rest of the code -- a callable
+All of these are the same shape to the rest of the code -- a callable
 `controller(observations) -> (right, left, speed)`, each `(..., 1)` in `[0, 1]`, or
-`None`. The reflexes are plain closures; `MLPController` is an `nn.Module`, so
-assigning it to `SwimmerActor.controller` (RL) or `NCAPSwimmerPolicy.controller` (ES)
-registers it as a submodule and its parameters are trained/evolved along with the
-circuit's own. Nothing else has to know which kind it got.
+`None`. The reflexes are plain closures; `LearnedSteering` and `MLPController` are
+`nn.Module`s, so assigning either to `SwimmerActor.controller` (RL) or
+`NCAPSwimmerPolicy.controller` (ES) registers it as a submodule and its parameters are
+trained/evolved along with the circuit's own. Nothing else has to know which kind it got.
 """
 
 import numpy as np
@@ -231,12 +235,20 @@ def check_controller(controller, network, task):
         )
 
 
-def make_controller(controller, n_joints):
-    """Build the named controller for an `n_joints` body; None passes through as None."""
+def make_controller(controller, n_joints, **controller_kwargs):
+    """Build the named controller for an `n_joints` body; None passes through as None.
+
+    Extra keyword arguments go straight to the factory, e.g.
+    make_controller('learned_steering', 5, turn_strength=0.5).
+    """
     if controller is None:
+        if controller_kwargs:
+            raise ValueError(
+                f'controller=None takes no options, got {sorted(controller_kwargs)}'
+            )
         return None
     if controller not in CONTROLLERS:
         raise ValueError(
             f'controller must be None or one of {sorted(CONTROLLERS)}, got {controller!r}'
         )
-    return globals()[CONTROLLERS[controller][0]](n_joints)
+    return globals()[CONTROLLERS[controller][0]](n_joints, **controller_kwargs)

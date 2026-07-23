@@ -26,7 +26,8 @@ hardcoded reflex up to a small learned controller. Everything here is additive o
 
 | Controller | Learned? | Foraging success (physics-only, 30 eps) |
 |---|---|---|
-| none (circuit swims straight) | — | ~10–23% |
+| none (circuit swims straight), untrained | — | ~10–23% |
+| **none, PPO-trained 1e5 steps** | circuit only | **23%** — identical to untrained |
 | *old saga best (swapped axes)* | — | *47%* |
 | MLP / learned-from-random-init (never found the sign) | yes | 7% |
 | **`steer_to_food`** (hardcoded, correct convention) | no | **~90%** |
@@ -35,9 +36,16 @@ hardcoded reflex up to a small learned controller. Everything here is additive o
 
 > Absolute numbers shift ~±10% with the evaluation seed (which fresh episodes are drawn),
 > so compare within one eval seed. The `forage_train_poc.ipynb` run (eval seed 0) reads
-> no-steering 23% / warm-start 80% / PPO-trained **93%**; the 3-seed sweep (eval seed
+> no-steering 23% / warm-start 83% / PPO-trained **93%**; the 3-seed sweep (eval seed
 > 4242) reads warm-start ~90% / PPO-trained 86.7%. Both are consistent with "learned ≈
 > hardcoded."
+>
+> The trained no-steering row is the sharpest version of the point. With `controller=None`
+> the circuit is built with `include_turn_control=False`, so there is no turn input for
+> PPO to learn to use — 1e5 steps of training on a dense food-seeking reward moves it from
+> 23% to 23%. The 23% itself is not navigation: it is the rate at which the default
+> undulating gait happens to graze food that spawned close by. **The gap to 93% is the
+> controller's, not training's.**
 
 ---
 
@@ -128,11 +136,25 @@ signal plus a success bonus.
 |---|---|---|
 | `speed_reward_weight` | **0.0** | stock swim-speed reward (off here to isolate food-seeking) |
 | `progress_reward_weight` | 0.0 | dense per-step reward for distance **closed** toward food (potential-based) |
+| `alignment_reward_weight` | 0.0 | reward for **facing** the food — `cos(bearing)`, +1 dead ahead, −1 dead behind |
+| `alignment_gated_progress_weight` | 0.0 | progress **scaled by** alignment, so distance closed while pointed the wrong way earns ~0 |
 | `eat_bonus` | 0.0 | one-off reward each time the food is reached |
 
 Progress is skipped on the first step and right after a respawn, so a target's sudden
 distance jump is never scored as a huge spurious loss. Plain `swim` is unchanged
 (`speed_reward_weight` defaults to 1.0 there).
+
+The last two came from the `improve-foraging-reflex` branch, where they were the largest
+single win found (a fixed reflex went 23% → 47% on `alignment_reward_weight=0.5` alone).
+**Those numbers do not transfer as-is:** that branch computed alignment as
+`to_target[0]/dist`, which on the measured axes is the *lateral* component — so it was
+rewarding swimming **abeam** of the food, not at it. The version here uses
+`-to_target[1]/dist`, verified by placing food at known bearings (ahead → +1.00,
+behind → −1.00, abeam → 0.00). Treat the weights as untuned on the corrected term.
+
+That branch also reported, across at least four separate checks, that two independently
+good changes reliably stack *worse* than either alone (progress + alignment + eat = 37%
+vs. 47% for alignment by itself). Worth knowing before combining these.
 
 ---
 
@@ -144,7 +166,7 @@ All run top-to-bottom; the first two need **no training**.
 |---|---|
 | `turn_poc.ipynb` | The worm turning **left** and **right** in place (turn primitive), videos + head-path plots. |
 | `forage_poc.ipynb` | The worm **navigating to food** with `steer_to_food` (~90%), video + trajectory + success bars. No training. |
-| `forage_train_poc.ipynb` | **Trains** `learned_steering` with PPO (~1e5 steps), then learning curve + a 3-way success comparison + a foraging video. |
+| `forage_train_poc.ipynb` | **Trains two runs** with PPO (~1e5 steps each) — NCAP alone (`controller=None`) and NCAP + `learned_steering` — on an identical reward, then learning curves + a 4-way success comparison (each run against its own untrained start) + a video and head-path plot per run. |
 
 ---
 

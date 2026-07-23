@@ -120,6 +120,8 @@ class Swim(swimmer.Swimmer):
         speed_reward_weight=1.0,
         target_reward_weight=1.0,
         progress_reward_weight=0.0,
+        alignment_reward_weight=0.0,
+        alignment_gated_progress_weight=0.0,
         eat_bonus=0.0,
         obstacle_penalty_weight=1.0,
         obstacle_safe_distance=0.4,
@@ -136,6 +138,8 @@ class Swim(swimmer.Swimmer):
         self._speed_reward_weight = speed_reward_weight
         self._target_reward_weight = target_reward_weight
         self._progress_reward_weight = progress_reward_weight
+        self._alignment_reward_weight = alignment_reward_weight
+        self._alignment_gated_progress_weight = alignment_gated_progress_weight
         self._eat_bonus = eat_bonus
         self._obstacle_penalty_weight = obstacle_penalty_weight
         self._obstacle_safe_distance = obstacle_safe_distance
@@ -222,8 +226,39 @@ class Swim(swimmer.Swimmer):
             # food since last step (potential-based shaping). Skipped on the episode's
             # first step and right after a respawn, so a target's sudden distance jump
             # is never scored as a huge spurious loss.
-            if self._progress_reward_weight and self._prev_target_dist is not None:
-                reward += self._progress_reward_weight * (self._prev_target_dist - dist)
+            progress = None
+            if self._prev_target_dist is not None:
+                progress = self._prev_target_dist - dist
+            if self._progress_reward_weight and progress is not None:
+                reward += self._progress_reward_weight * progress
+
+            # Alignment reward: credit for *facing* the food, which the distance terms
+            # above never ask for directly -- they only reward outcomes a good heading
+            # tends to produce eventually. alignment is cos(bearing to food): +1 dead
+            # ahead, 0 abeam, -1 dead behind.
+            #
+            # The forward component is -to_target[1], NOT to_target[0]: nose_to_target
+            # is head-egocentric [lateral, longitudinal] with the body's long axis on
+            # local y and the nose at its -ve end. Measured directly against the
+            # simulator -- food AHEAD gives [0, -0.5], food LEFT gives [+0.5, 0]. Get
+            # this backwards and the term rewards swimming *sideways* past the food.
+            alignment = None
+            if dist > 1e-6:
+                alignment = -physics.nose_to_target()[1] / dist
+            if self._alignment_reward_weight and alignment is not None:
+                reward += self._alignment_reward_weight * alignment
+
+            # Alignment-gated progress: progress scaled by how well the worm is facing
+            # the food, rather than added to it as an independent term. Adding the two
+            # independently measured *worse* than either alone; gating targets the
+            # failure that combination doesn't -- distance closed by incidental drift
+            # while pointed the wrong way earning the same credit as distance closed
+            # while actually swimming at the food.
+            if (self._alignment_gated_progress_weight
+                    and progress is not None and alignment is not None):
+                reward += (self._alignment_gated_progress_weight
+                           * progress * max(alignment, 0.0))
+
             self._prev_target_dist = dist
 
             if dist < target_size:  # worm reached the food -- reward it, then respawn
@@ -321,6 +356,8 @@ def foraging(
     n_obstacles=3,
     speed_reward_weight=0.0,
     progress_reward_weight=0.0,
+    alignment_reward_weight=0.0,
+    alignment_gated_progress_weight=0.0,
     eat_bonus=0.0,
     time_limit=swimmer._DEFAULT_TIME_LIMIT,
     random=None,
@@ -331,9 +368,13 @@ def foraging(
     speed_reward_weight defaults to 0 here (unlike plain `swim`, where it is 1): the
     stock swim-speed reward dominates and rewards "just swim fast" regardless of where
     the food is, which masks whether a controller actually steers to food. Turning it
-    off isolates the food-seeking signal. progress_reward_weight (dense per-step credit
-    for distance closed) and eat_bonus (a one-off reward each time food is reached) both
-    default to 0 -- opt in via task_kwargs. See Swim.get_reward.
+    off isolates the food-seeking signal.
+
+    The four shaping terms -- progress_reward_weight (distance closed per step),
+    alignment_reward_weight (facing the food), alignment_gated_progress_weight
+    (distance closed, scaled by how well it's facing the food) and eat_bonus (a one-off
+    each time food is reached) -- all default to 0, so an existing config's reward is
+    unchanged; opt in via task_kwargs. See Swim.get_reward for what each computes.
     """
     model_string, assets = get_model_and_assets(
         n_links, n_obstacles=n_obstacles if enable_obstacles else 0
@@ -347,6 +388,8 @@ def foraging(
         n_obstacles=n_obstacles,
         speed_reward_weight=speed_reward_weight,
         progress_reward_weight=progress_reward_weight,
+        alignment_reward_weight=alignment_reward_weight,
+        alignment_gated_progress_weight=alignment_gated_progress_weight,
         eat_bonus=eat_bonus,
         random=random,
     )
