@@ -55,10 +55,17 @@ def _add_obstacles(
     return etree.tostring(mjcf, pretty_print=True)
 
 
-def get_model_and_assets(n_joints, n_obstacles=0):
+def get_model_and_assets(n_joints, n_obstacles=0, obstacle_max_distance=0.6):
     model_string, assets = swimmer.get_model_and_assets(n_joints)
     if n_obstacles > 0:
-        model_string = _add_obstacles(model_string, n_obstacles)
+        # Default max_distance_from_origin (0.6) only leaves room for ~3-4 obstacles
+        # before the 50-attempt rejection sampler starts failing its own
+        # min_obstacle_separation and placing them overlapping anyway (checked
+        # directly: 6+ obstacles at the default range fail on 1-2 of them per seed).
+        # Widening the radius gives the sampler enough room to fit more without that.
+        model_string = _add_obstacles(
+            model_string, n_obstacles, max_distance_from_origin=obstacle_max_distance
+        )
     return model_string, assets
 
 
@@ -455,6 +462,7 @@ def foraging(
     enable_foraging=True,
     enable_obstacles=False,
     n_obstacles=3,
+    obstacle_max_distance=0.6,
     speed_reward_weight=0.0,
     progress_reward_weight=0.0,
     alignment_reward_weight=0.0,
@@ -464,6 +472,7 @@ def foraging(
     velocity_alignment_ema_alpha=0.02,
     eaten_bonus=0.0,
     target_distance=None,
+    food_size=0.02,
     time_limit=swimmer._DEFAULT_TIME_LIMIT,
     random=None,
     environment_kwargs={},
@@ -485,9 +494,21 @@ def foraging(
     target_distance: pin each pellet to this distance at a random bearing (from
     the worm's nose on respawn) instead of dm_control's random box spawn -- see
     Swim._place_target. None keeps the stock behaviour.
+
+    obstacle_max_distance: how far out obstacles can spawn from the origin -- widen
+    this when raising n_obstacles past ~4-5, or the fixed 0.5-unit min separation
+    between them can't be satisfied in the default radius and they start overlapping
+    (see get_model_and_assets).
+
+    food_size: visual/collision radius of the food geom. Default (0.02) is tiny --
+    fine for eval (min_dist thresholds don't care how it looks), but easy to miss
+    entirely in a rendered video at a wide camera distance, especially next to
+    0.05-radius obstacles. Bump this for a demo video; leave it alone for anything
+    measuring physics-only success, since it also changes the "true eat" threshold.
     """
     model_string, assets = get_model_and_assets(
-        n_links, n_obstacles=n_obstacles if enable_obstacles else 0
+        n_links, n_obstacles=n_obstacles if enable_obstacles else 0,
+        obstacle_max_distance=obstacle_max_distance,
     )
     physics = Physics.from_xml_string(model_string, assets=assets)
     task = Swim(
@@ -505,6 +526,7 @@ def foraging(
         velocity_alignment_ema_alpha=velocity_alignment_ema_alpha,
         eaten_bonus=eaten_bonus,
         target_distance=target_distance,
+        food_size=food_size,
         random=random,
     )
     return control.Environment(
