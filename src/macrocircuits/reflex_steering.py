@@ -249,12 +249,9 @@ def make_steer_to_food_reflex(n_joints, strength=0.75, gain=3.0):
     the calibrated turn magnitude (0.75 gives a tight clean turn without overpowering
     the head oscillator into a curl-up); `gain` sets how sharply the command grows with
     the angle. Deliberately no D-term, no adaptive gain, no phase-gating, no hard
-    clamp (tanh instead, so there is never a dead-gradient region) -- on Luka's branch
-    this alone reached ~90% physics-only success on foraging, dramatically ahead of
-    every tuned variant of the (axis-swapped) P+D reflex above, suggesting most of
-    that reflex's complexity was compensating for the axis bug rather than adding
-    real value. Not yet independently re-verified on this branch -- that's the point
-    of testing it here rather than taking the number on faith.
+    clamp (tanh instead, so there is never a dead-gradient region), and deliberately
+    constant speed -- kept exactly as Luka's own version has it, not something to
+    improve on unilaterally here.
     """
     target_slice = slice(n_joints, n_joints + 2)
 
@@ -631,6 +628,12 @@ def make_obstacle_avoidance_reflex(n_joints, reaction_distance=0.6):
     Same observation layout as before, but now also uses distance (the magnitude
     of the to_obstacle vector) to scale the response: a distant obstacle barely
     registers, a close one dominates. reaction_distance is a fixed threshold.
+
+    Kept as-is for provenance -- has the same forward/lateral axis-swap bug as the
+    original `make_foraging_reflex` (confirmed the same way: `nose_to_obstacles` uses
+    the identical `.dot(head_orientation)` construction as `nose_to_target`, so the
+    same convention fix applies). `make_avoid_obstacle_reflex` below is the corrected
+    replacement, in the `steer_to_food` style.
     """
     obstacle_slice = slice(n_joints, n_joints + 2)
 
@@ -645,6 +648,81 @@ def make_obstacle_avoidance_reflex(n_joints, reaction_distance=0.6):
         right = (-lateral).clamp(min=0, max=1) * urgency
         left = lateral.clamp(min=0, max=1) * urgency
         speed = torch.ones_like(right)
+        return right, left, speed
+
+    return reflex
+
+
+def make_avoid_obstacle_reflex(n_joints, reaction_distance=0.6, strength=0.75, gain=3.0):
+    """Corrected replacement for `make_obstacle_avoidance_reflex`, built on the same
+    MEASURED egocentric convention as `make_steer_to_food_reflex`:
+        lateral = to_obstacle[0]   (+ve => obstacle is to the worm's LEFT)
+        forward = -to_obstacle[1]  (+ve => obstacle is AHEAD)
+
+    Steers by the full bearing angle (atan2), not raw lateral alone, so a
+    dead-ahead-but-far obstacle and a dead-ahead-and-close one are both handled by the
+    same urgency-scaled turn-away response the bearing gives -- matching how
+    `make_steer_to_food_reflex` steers toward food, just negated (turn away from the
+    obstacle's bearing instead of toward the target's). `reaction_distance` sets how
+    far out avoidance starts ramping in; `strength`/`gain` are the same calibrated
+    turn-shape as the food reflex.
+    """
+    obstacle_slice = slice(n_joints, n_joints + 2)
+
+    def reflex(observations):
+        to_obstacle = observations[..., obstacle_slice]
+        lateral = to_obstacle[..., 0, None]
+        forward = -to_obstacle[..., 1, None]
+        distance = torch.norm(to_obstacle, dim=-1, keepdim=True)
+        angle = torch.atan2(lateral, forward)  # 0 = ahead, +ve = obstacle to the LEFT
+
+        urgency = (1 - distance / reaction_distance).clamp(min=0, max=1)
+        # Negated vs. the food reflex: steer AWAY from the obstacle's bearing.
+        u = -torch.tanh(gain * angle) * strength * urgency
+        left = u.clamp(min=0)
+        right = (-u).clamp(min=0)
+        speed = torch.ones_like(u)
+        return right, left, speed
+
+    return reflex
+
+
+def make_forage_and_avoid_reflex(
+    n_joints, forage_strength=0.75, forage_gain=3.0,
+    avoid_strength=0.75, avoid_gain=3.0, reaction_distance=0.6,
+):
+    """Combines `make_steer_to_food_reflex` and `make_avoid_obstacle_reflex` into one
+    controller for `foraging(enable_obstacles=True)`, where the observation carries
+    both `to_target` and `to_obstacle` (in that order -- see envs.Swim.get_observation).
+
+    Blends the two turn commands by obstacle urgency: food-seeking dominates until an
+    obstacle gets close, then avoidance smoothly takes over (urgency -> 1 fully
+    overrides foraging, not just adds to it -- an obstacle directly in the escape path
+    should win outright, not be diluted by summing two competing commands). Still zero
+    learnable parameters, same `steer_to_food` philosophy throughout.
+    """
+    target_slice = slice(n_joints, n_joints + 2)
+    obstacle_slice = slice(n_joints + 2, n_joints + 4)
+
+    def reflex(observations):
+        to_target = observations[..., target_slice]
+        target_lateral = to_target[..., 0, None]
+        target_forward = -to_target[..., 1, None]
+        target_angle = torch.atan2(target_lateral, target_forward)
+        forage_u = torch.tanh(forage_gain * target_angle) * forage_strength
+
+        to_obstacle = observations[..., obstacle_slice]
+        obs_lateral = to_obstacle[..., 0, None]
+        obs_forward = -to_obstacle[..., 1, None]
+        obs_distance = torch.norm(to_obstacle, dim=-1, keepdim=True)
+        obs_angle = torch.atan2(obs_lateral, obs_forward)
+        avoid_u = -torch.tanh(avoid_gain * obs_angle) * avoid_strength
+        urgency = (1 - obs_distance / reaction_distance).clamp(min=0, max=1)
+
+        u = (1 - urgency) * forage_u + urgency * avoid_u
+        left = u.clamp(min=0)
+        right = (-u).clamp(min=0)
+        speed = torch.ones_like(u)
         return right, left, speed
 
     return reflex

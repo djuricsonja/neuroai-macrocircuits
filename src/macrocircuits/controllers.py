@@ -30,6 +30,8 @@ import torch.nn as nn
 
 from macrocircuits.envs import TASKS
 from macrocircuits.reflex_steering import (
+    make_avoid_obstacle_reflex,
+    make_forage_and_avoid_reflex,
     make_foraging_reflex,
     make_foraging_reflex_adaptive,
     make_foraging_reflex_adaptive_learnable,
@@ -124,6 +126,11 @@ CONTROLLERS = {
     'foraging_distance_scaled': ('make_foraging_reflex_distance_scaled', ('foraging', 'swim_to_ball')),
     'steer_to_food': ('make_steer_to_food_reflex', ('foraging', 'swim_to_ball')),
     'obstacle_avoidance': ('make_obstacle_avoidance_reflex', ('evasion',)),
+    'avoid_obstacle': ('make_avoid_obstacle_reflex', ('evasion',)),
+    # Needs both to_target and to_obstacle in the observation, i.e. the 'foraging'
+    # task with enable_obstacles=True in task_kwargs -- check_controller only
+    # validates the task name, not that flag, so pass it explicitly when using this.
+    'forage_and_avoid': ('make_forage_and_avoid_reflex', ('foraging',)),
     'mlp_foraging': ('make_foraging_mlp', ('foraging', 'swim_to_ball')),
     'mlp_obstacle_avoidance': ('make_obstacle_avoidance_mlp', ('evasion',)),
 }
