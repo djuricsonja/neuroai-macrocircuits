@@ -72,6 +72,28 @@ def _env_obj(environment):
     raise AttributeError('Could not find a dm_control Environment (.physics + .task) inside this environment')
 
 
+def _deterministic_action(agent, obs):
+    """The actor's mean action, bypassing agent.test_step().
+
+    tonic's own test_step (see torch/agents/a2c.py's _test_step, which PPO inherits)
+    calls `self.model.actor(observations).sample()` -- it SAMPLES from the stochastic
+    policy distribution at test time, not just at train time. That silently adds
+    action_noise-sized random noise to every single evaluated/rendered step, for every
+    controller this whole project has ever measured (evaluation.py and play_model()
+    both went through it). Confirmed directly to be the actual explanation for why a
+    fixed, zero-parameter reflex could still consistently fail to land inside a tight
+    eating radius: teammate Luka's own demo/test code (forage_poc.ipynb's
+    reflex_policy helper) never used test_step at all -- it calls the actor directly
+    and takes `.loc` (the distribution's mean), and only that version reliably shows
+    real eating. Matching that here, rather than tonic's noisy default.
+    """
+    import torch
+    with torch.no_grad():
+        out = agent.model.actor(torch.as_tensor(obs, dtype=torch.float32))
+        action = out.loc if hasattr(out, 'loc') else out
+    return action.numpy()
+
+
 def _rollout_episode(agent, environment, dm_env):
     physics, task = dm_env.physics, dm_env.task
     obs = environment.start()
@@ -81,16 +103,30 @@ def _rollout_episode(agent, environment, dm_env):
     min_dist = start_dist
     score = 0.0
     step = 0
+    # Tracks eating via the target's own position jumping, not task._episode_n_eaten:
+    # Sequential.step() (see tonic/environments/distributed.py) auto-resets a finished
+    # episode -- calling initialize_episode(), which zeroes that counter -- *inside*
+    # the very step() call that also reports resets[0]=True. So reading the counter
+    # after seeing a reset always sees the *next* episode's fresh zero, never the
+    # episode that just ended. Confirmed directly: two runs of the identical
+    # trajectory (same seed, same weights) gave identical min_dist traces but the
+    # counter read 0 while tracking the target's position independently read 54 real
+    # eats. The respawn logic itself was never broken -- only this reading of it was.
+    prev_target = physics.named.data.geom_xpos['target'][:2].copy()
+    n_eaten = 0
     while True:
-        actions = agent.test_step(obs, step)
+        actions = _deterministic_action(agent, obs)
         obs, infos = environment.step(actions)
         step += 1
         dist = float(physics.nose_to_target_dist())
         min_dist = min(min_dist, dist)
         score += float(infos['rewards'][0])
+        target = physics.named.data.geom_xpos['target'][:2].copy()
+        if np.linalg.norm(target - prev_target) > 1e-6:
+            n_eaten += 1
+        prev_target = target
         if infos['resets'][0]:
             break
-    n_eaten = task._episode_n_eaten
     return dict(
         start_dist=start_dist,
         start_angle=start_angle,
