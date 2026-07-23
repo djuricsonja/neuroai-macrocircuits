@@ -117,7 +117,12 @@ class Swim(swimmer.Swimmer):
         enable_foraging=False,
         enable_obstacles=False,
         n_obstacles=3,
+        speed_reward_weight=1.0,
         target_reward_weight=1.0,
+        progress_reward_weight=0.0,
+        alignment_reward_weight=0.0,
+        alignment_gated_progress_weight=0.0,
+        eaten_bonus=0.0,
         obstacle_penalty_weight=1.0,
         obstacle_safe_distance=0.4,
         obstacle_min_distance=0.5,
@@ -130,15 +135,23 @@ class Swim(swimmer.Swimmer):
         self._enable_foraging = enable_foraging
         self._enable_obstacles = enable_obstacles
         self._n_obstacles = n_obstacles if enable_obstacles else 0
+        self._speed_reward_weight = speed_reward_weight
         self._target_reward_weight = target_reward_weight
+        self._progress_reward_weight = progress_reward_weight
+        self._alignment_reward_weight = alignment_reward_weight
+        self._alignment_gated_progress_weight = alignment_gated_progress_weight
+        self._eaten_bonus = eaten_bonus
         self._obstacle_penalty_weight = obstacle_penalty_weight
         self._obstacle_safe_distance = obstacle_safe_distance
         self._obstacle_min_distance = obstacle_min_distance
         self._food_size = food_size
+        self._prev_target_dist = None
 
     def initialize_episode(self, physics):
         # disabled = bool(physics.model.opt.disableflags & mujoco.mjtDisableBit.mjDSBL_CONTACT)
         # print('contact globally disabled:', disabled)
+
+        self._prev_target_dist = None  # fresh episode -- no prior-step distance yet
 
         if self._enable_foraging or self._enable_single_target:
             # Skip Swim's target-hiding step; call the grandparent (stock Swimmer)
@@ -182,7 +195,7 @@ class Swim(swimmer.Swimmer):
 
     def get_reward(self, physics):
         forward_velocity = -physics.named.data.sensordata['head_vel'][1]
-        reward = rewards.tolerance(
+        reward = self._speed_reward_weight * rewards.tolerance(
             forward_velocity,
             bounds=(self._desired_speed, float('inf')),
             margin=self._desired_speed,
@@ -208,10 +221,58 @@ class Swim(swimmer.Swimmer):
                 margin=5 * target_size,
                 sigmoid='long_tail',
             )
+
+            # Progress reward: distance closed since the previous step, positive when
+            # getting closer. Unlike the tolerance term above (near-zero unless
+            # already close, margin is only 5x the tiny food size), this gives dense,
+            # continuous feedback throughout an approach -- classic potential-based
+            # reward shaping (Ng, Harada & Russell 1999), which doesn't change the
+            # optimal policy, just how easy it is to find via gradient-based
+            # training. Skipped on the very first step of an episode (no prior
+            # distance yet) and right after a respawn (see below), so a fresh/new
+            # target's sudden distance jump is never scored as a huge, spurious
+            # negative "regression".
+            progress = None
+            if self._prev_target_dist is not None:
+                progress = self._prev_target_dist - dist
+            if self._progress_reward_weight and progress is not None:
+                reward += self._progress_reward_weight * progress
+
+            # Alignment reward: reward facing the food directly (egocentric forward
+            # component of the unit vector to it), not just being near it -- distance
+            # reward alone never explicitly rewards good heading, it only rewards
+            # outcomes that a good heading tends to produce eventually.
+            alignment = None
+            if dist > 1e-6:
+                to_target = physics.nose_to_target()
+                alignment = to_target[0] / dist  # cos(angle to target), egocentric
+            if self._alignment_reward_weight and alignment is not None:
+                reward += self._alignment_reward_weight * alignment
+
+            # Alignment-gated progress: instead of adding progress and alignment as two
+            # independent terms (tried, and stacked *worse* than either alone -- see
+            # foraging_reflex_debugging_saga memory), scale progress by how aligned the
+            # worm currently is (clamped to [0, inf), so a badly-misaligned step earns
+            # ~0 credit for it instead of full credit). Targets the specific failure
+            # mode the additive combination didn't: distance closed by incidental drift
+            # while facing the wrong way (real earlier in this project -- the "close
+            # starts succeed via lucky wiggle" confound) shouldn't get the same credit
+            # as distance closed while actually pointed at the food.
+            if self._alignment_gated_progress_weight and progress is not None and alignment is not None:
+                reward += self._alignment_gated_progress_weight * progress * max(alignment, 0.0)
+
+            self._prev_target_dist = dist
+
             if dist < target_size:  # worm reached the food -- respawn it
+                reward += self._eaten_bonus
                 xpos, ypos = self.random.uniform(-1.5, 1.5, size=2)
                 physics.named.model.geom_pos['target', 'x'] = xpos
                 physics.named.model.geom_pos['target', 'y'] = ypos
+                # Re-measure against the newly-spawned target so next step's progress
+                # reward reflects real motion relative to it, not the jump caused by
+                # this respawn (which would otherwise look like the worm suddenly
+                # moved miles away from a "new" prior distance of ~0).
+                self._prev_target_dist = physics.nose_to_target_dist()
 
         if self._enable_obstacles:
             _, dist = physics.nearest_obstacle(self._n_obstacles)
@@ -297,11 +358,28 @@ def foraging(
     enable_foraging=True,
     enable_obstacles=False,
     n_obstacles=3,
+    speed_reward_weight=0.0,
+    progress_reward_weight=0.0,
+    alignment_reward_weight=0.0,
+    alignment_gated_progress_weight=0.0,
+    eaten_bonus=0.0,
     time_limit=swimmer._DEFAULT_TIME_LIMIT,
     random=None,
     environment_kwargs={},
 ):
-    """Returns the Swim task, with optional foraging and obstacle avoidance."""
+    """Returns the Swim task, with optional foraging and obstacle avoidance.
+
+    speed_reward_weight defaults to 0 here (unlike the base Swim/swim task, where it
+    defaults to 1): this isolates the food-seeking reward so it's possible to check
+    whether a controller is actually approaching food, without swim-speed reward
+    masking the answer. Pass speed_reward_weight=1.0 to restore the normal combined
+    reward.
+
+    progress_reward_weight, alignment_reward_weight, alignment_gated_progress_weight,
+    eaten_bonus all default to 0 (opt-in, same reasoning as speed_reward_weight --
+    don't change behavior for existing configs). See Swim.get_reward for what each one
+    actually computes.
+    """
     model_string, assets = get_model_and_assets(
         n_links, n_obstacles=n_obstacles if enable_obstacles else 0
     )
@@ -312,6 +390,11 @@ def foraging(
         enable_foraging=enable_foraging,
         enable_obstacles=enable_obstacles,
         n_obstacles=n_obstacles,
+        speed_reward_weight=speed_reward_weight,
+        progress_reward_weight=progress_reward_weight,
+        alignment_reward_weight=alignment_reward_weight,
+        alignment_gated_progress_weight=alignment_gated_progress_weight,
+        eaten_bonus=eaten_bonus,
         random=random,
     )
     return control.Environment(
