@@ -11,6 +11,7 @@ What's been tried on `make_foraging_reflex` (branch `improve-foraging-reflex`), 
 - **Three structural reflex tweaks (phase-aware gain, distance-scaled gain, learnable adapt_strength) all failed to beat baseline** — see Phase 8. A velocity-alignment reward reached 33% and EMA-smoothing it was a dead end — see Phase 9. Across the whole project, only *reward-side* changes (and now, the spawn-distance curriculum) have ever produced a repeatable win; every purely structural reflex tweak has failed.
 - **The single most important methodology point**: raw training reward (`log.csv` mean/max) is actively misleading in this environment and cannot be trusted on its own. Physics-only success rate — the fraction of fresh episodes where the worm's distance to food drops below 0.15 units at some point, measured directly from simulator state — is the only metric ever used to rank configs. This distinction mattered enormously and is the reason several early "great results" turned out to be nothing at all (see Phase 0 and Phase 3).
 - **Now following a shared team plan** (`FORAGING_FORWARD_PLAN.md`, Sonja + Luka) rather than ad-hoc exploration — see the dedicated section below for what's changed as a result.
+- **Open decision, pending team input**: the plan's chosen team-default reward (signed progress) generalizes to stock spawn worse than alignment does under the same fixed-distance setup (28.3% vs 40.0%, see Phase 2) — not yet resolved which one carries into the Phase 3 bake-off.
 
 ## How the reflex works, briefly
 
@@ -199,7 +200,19 @@ Tested directly on `foraging` (skipping the plan's suggested `swim_to_ball` debu
 
 **MLP ceiling**: explicitly deprioritized per team decision — not worth spending training time on until the NCAP side (reflex vs. Luka's circuit-steering) is settled; trivial to add back later. A far-better-trained MLP checkpoint (500k steps) already exists on a teammate's `obstacles-foraging-no-controller` worktree if a ceiling number is wanted without retraining, though it was trained under the stock combined reward rather than this project's isolated food-seeking setup.
 
-**Next**: lock in the plan's Phase 2 team-default reward (signed progress, demoting alignment to reference-only) before the actual Phase 3 controller bake-off (reflex vs. Luka's circuit-steering vs. floor, no MLP for now). The axis-label bug fix is still an open, deliberately-deferred ablation.
+### Phase 2 — Testing the plan's team-default reward (signed progress) against alignment
+
+The plan names Luka's signed-progress reward as the shared team default, demoting alignment to "reference only." Tested it under the identical Phase 1 setup (fixed distance 0.8, same reflex, `progress_reward_weight=20.0` — the value already settled in Phase 7 — in place of `alignment_reward_weight=0.5`):
+
+| Reward | Fixed 0.8 (in-distribution) | Stock spawn (generalization) |
+|---|---|---|
+| alignment (0.5) | 60.0% ± 12.5 | **40.0% ± 12.5** |
+| progress (20.0) | 55.0% ± 12.7 | **28.3% ± 11.5** |
+| floor (reference) | 10.0% ± 7.7 | 25.0% ± 11.0 |
+
+Both reward terms clearly beat floor in-distribution and are statistically tied with each other there. But on the generalization check, alignment holds a real edge while progress barely clears floor (28.3% vs. floor's 25.0% — CIs [16.8,39.8] vs [14,36], mostly overlapping). **This is a tension with the plan's stated default**, not yet resolved: at n=60 it could still be noise, but the direction is consistent with what's been true all project long (alignment has always been the strongest single lever, back to the original 47%/23% comparison). Decision on which reward to carry into the Phase 3 bake-off is pending team discussion — not unilaterally overridden here.
+
+**Next**: once the reward choice is settled, run the actual Phase 3 controller bake-off (reflex vs. Luka's circuit-steering vs. floor, no MLP for now). The axis-label bug fix is still an open, deliberately-deferred ablation.
 
 ---
 
