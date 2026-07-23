@@ -26,8 +26,12 @@ from macrocircuits.controllers import (
     check_controller,
     make_foraging_mlp,
     make_foraging_reflex,
+    make_learned_steering,
     make_obstacle_avoidance_mlp,
     make_obstacle_avoidance_reflex,
+    make_steer_to_food_reflex,
+    make_turn_left_reflex,
+    make_turn_right_reflex,
 )
 
 # Imported so that the code strings passed to train() and stored in config.yaml --
