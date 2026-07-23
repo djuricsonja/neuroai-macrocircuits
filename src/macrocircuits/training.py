@@ -24,6 +24,8 @@ from macrocircuits.video import display_video
 from macrocircuits.controllers import (
     CONTROLLERS as _CONTROLLERS,
     check_controller,
+    make_avoid_obstacle_reflex,
+    make_forage_and_avoid_reflex,
     make_foraging_mlp,
     make_foraging_reflex,
     make_foraging_reflex_adaptive,
@@ -472,6 +474,23 @@ def train(
     )
     test_environment = tonic.environments.distribute(lambda: eval(_environment, namespace))
 
+    # tonic's own Trainer.initialize() (see utils/trainer.py) never calls this, and
+    # Trainer.run() goes straight to environment.start() -- which Sequential (the
+    # parallel=1 case every run in this project has used until now) tolerates, since
+    # its __init__ already sets everything .start() needs. Parallel does not: the
+    # worker processes and the .started flag .start() asserts on are only created
+    # inside .initialize(), so parallel>1 crashes with
+    # "'Parallel' object has no attribute 'started'" without this call. This is a bug
+    # in the tonic fork itself (Ressources/tonic/, cloned fresh by ensure_tonic() and
+    # gitignored -- not something fixable by editing it there, since that copy is
+    # never shared), so the fix lives here instead. test_environment gets a distinct
+    # seed offset so its episodes don't deterministically replay whatever train worker
+    # 0 also sees.
+    if hasattr(environment, 'initialize'):
+        environment.initialize(seed)
+    if hasattr(test_environment, 'initialize'):
+        test_environment.initialize(seed + 1_000_000)
+
     # Build the agent.
     agent = eval(agent, namespace)
     agent.initialize(
@@ -678,9 +697,20 @@ def play_model(
     frames = [render_frame()]
     score, length = 0, 0
 
+    import torch
+
     while True:
-        # Select an action.
-        actions = agent.test_step(test_observations, steps)
+        # Select an action -- the actor's mean, not agent.test_step(). tonic's own
+        # test_step (torch/agents/a2c.py's _test_step, which PPO inherits) calls
+        # `self.model.actor(observations).sample()`: it SAMPLES from the stochastic
+        # policy distribution even at test time, adding action_noise-sized random
+        # noise to every rendered step. Confirmed directly this was why videos of a
+        # fixed, zero-parameter reflex still looked imprecise (e.g. never quite
+        # landing inside a tight eating radius) -- matches the same fix applied in
+        # evaluation.py, and Luka's own demo code, which never used test_step at all.
+        with torch.no_grad():
+            out = agent.model.actor(torch.as_tensor(test_observations, dtype=torch.float32))
+            actions = (out.loc if hasattr(out, 'loc') else out).numpy()
         assert not np.isnan(actions.sum())
 
         # Take a step in the environment.
