@@ -37,6 +37,7 @@ from macrocircuits.reflex_steering import (
     make_foraging_reflex_learnable,
     make_foraging_reflex_phase_aware,
     make_obstacle_avoidance_reflex,
+    make_steer_to_food_reflex,
 )
 
 
@@ -121,6 +122,7 @@ CONTROLLERS = {
     'foraging_adaptive_learnable': ('make_foraging_reflex_adaptive_learnable', ('foraging', 'swim_to_ball')),
     'foraging_phase_aware': ('make_foraging_reflex_phase_aware', ('foraging', 'swim_to_ball')),
     'foraging_distance_scaled': ('make_foraging_reflex_distance_scaled', ('foraging', 'swim_to_ball')),
+    'steer_to_food': ('make_steer_to_food_reflex', ('foraging', 'swim_to_ball')),
     'obstacle_avoidance': ('make_obstacle_avoidance_reflex', ('evasion',)),
     'mlp_foraging': ('make_foraging_mlp', ('foraging', 'swim_to_ball')),
     'mlp_obstacle_avoidance': ('make_obstacle_avoidance_mlp', ('evasion',)),

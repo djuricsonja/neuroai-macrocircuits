@@ -232,6 +232,46 @@ def make_foraging_reflex(
     return reflex
 
 
+def make_steer_to_food_reflex(n_joints, strength=0.75, gain=3.0):
+    """Hardcoded navigation: turn toward the food and swim. A fixed reflex (no
+    learning), ported from teammate Luka's `hardcoded-turn-reflex` branch, built on the
+    MEASURED egocentric convention -- unlike `make_foraging_reflex` above, whose
+    `forward`/`lateral` axes were confirmed (independently, on both branches) to be
+    swapped, so it could never actually steer correctly.
+
+    Convention (see verify_axis_convention3/4 in this project's own debugging history,
+    and Luka's check_convention diagnostic -- both measured the same thing the same
+    way and got the same answer):
+        lateral = to_target[0]   (+ve => food is to the worm's LEFT)
+        forward = -to_target[1]  (+ve => food is AHEAD)
+    angle = atan2(lateral, forward) is 0 dead ahead, +ve when food is to the left; the
+    turn command drives NCAP's `left` input to turn the worm to its left. `strength` is
+    the calibrated turn magnitude (0.75 gives a tight clean turn without overpowering
+    the head oscillator into a curl-up); `gain` sets how sharply the command grows with
+    the angle. Deliberately no D-term, no adaptive gain, no phase-gating, no hard
+    clamp (tanh instead, so there is never a dead-gradient region) -- on Luka's branch
+    this alone reached ~90% physics-only success on foraging, dramatically ahead of
+    every tuned variant of the (axis-swapped) P+D reflex above, suggesting most of
+    that reflex's complexity was compensating for the axis bug rather than adding
+    real value. Not yet independently re-verified on this branch -- that's the point
+    of testing it here rather than taking the number on faith.
+    """
+    target_slice = slice(n_joints, n_joints + 2)
+
+    def reflex(observations):
+        to_target = observations[..., target_slice]
+        lateral = to_target[..., 0, None]
+        forward = -to_target[..., 1, None]
+        angle = torch.atan2(lateral, forward)      # 0 = ahead, +ve = food to the LEFT
+        u = torch.tanh(gain * angle) * strength     # +ve => turn left
+        left = u.clamp(min=0)
+        right = (-u).clamp(min=0)
+        speed = torch.ones_like(u)
+        return right, left, speed
+
+    return reflex
+
+
 def _leaky_clamp_straight_through(x, min_val=0.0, max_val=1.0, leak=0.01):
     """clamp(x, min_val, max_val), but with a small leak-slope gradient outside that
     range instead of the hard clamp's exact zero -- a straight-through estimator: the
