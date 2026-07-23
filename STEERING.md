@@ -166,6 +166,7 @@ All run top-to-bottom; the first two need **no training**.
 |---|---|
 | `turn_poc.ipynb` | The worm turning **left** and **right** in place (turn primitive), videos + head-path plots. |
 | `forage_poc.ipynb` | The worm **navigating to food** with `steer_to_food` (~90%), video + trajectory + success bars. No training. |
+| `forage_grid.ipynb` | **The full grid**: 3 models (`mlp`, `ncap`, `ncap`+`learned_steering`) x 2 learning approaches (`ppo`, `es`) at paper budgets (1e6 steps / 100 ES generations, ~5 h). Per-run failures are caught so one bad run doesn't sink the rest. |
 | `forage_train_poc.ipynb` | **Trains two runs** with PPO (~1e5 steps each) — NCAP alone (`controller=None`) and NCAP + `learned_steering` — on an identical reward, then learning curves + a 4-way success comparison (each run against its own untrained start) + a video and head-path plot per run. |
 
 ---
