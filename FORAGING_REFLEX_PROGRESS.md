@@ -4,9 +4,13 @@ What's been tried on `make_foraging_reflex` (branch `improve-foraging-reflex`), 
 
 ## TL;DR
 
-- **Current best config**: the fixed `gain16x` reflex (`angle_gain=16.0`, `rate_gain=112.0`) plus `alignment_reward_weight=0.5` on the reward. **47% physics-only success rate** (up from a 23% baseline with no changes at all). Still far from solved — more than half of episodes still fail.
-- **Two newer levers, each independently at ~43%, not yet beating 47%, currently being tuned**: a multiplicative "alignment-gated progress" reward, and an adaptive-gain reflex that reacts to its own P/D-term agreement. Combining them did not help (see below).
-- **The single most important methodology point**: raw training reward (`log.csv` mean/max) is actively misleading in this environment and cannot be trusted on its own. Every number below is a **physics-only success rate** — the fraction of 30 fresh episodes where the worm's distance to food drops below 0.15 units at some point, measured directly from simulator state, independent of whatever reward function trained the checkpoint. This distinction mattered enormously and is the reason several early "great results" turned out to be nothing at all (see Phase 0 and Phase 3).
+- **Current best config**: the fixed `gain16x` reflex (`angle_gain=16.0`, `rate_gain=112.0`) plus `alignment_reward_weight=0.5` on the reward. **47% physics-only success rate** on the original single-seed measurement — **but a multi-seed re-check ties it with the no-steering floor (26.7% vs 25.0%, n=60, see the "Adopting the shared team plan" section)**. Treat 47% as provisional, not settled.
+- **A real, structural bug was found**: `make_foraging_reflex`'s `forward`/`lateral` axis labels are swapped relative to the true physical axes (confirmed directly against the simulator), producing a consistent 90-degree error in its internal steering angle. Predates this whole project. Deliberately not fixed yet — planned as its own isolated ablation once there's a stable baseline (see "Structural bug found" section).
+- **Fixed-distance spawn training (Phase 1 of the shared team plan) shows the reflex does do something real**: 60% in-distribution / 40% stock-spawn-generalization vs. floor's 10%/25% under the identical manipulation — a clean, well-controlled result, obtained *despite* the axis bug still being unfixed.
+- **Two older levers, each independently settled at 43%**: a multiplicative "alignment-gated progress" reward, and an adaptive-gain reflex that reacts to its own P/D-term agreement. Combining them did not help (see below).
+- **Three structural reflex tweaks (phase-aware gain, distance-scaled gain, learnable adapt_strength) all failed to beat baseline** — see Phase 8. A velocity-alignment reward reached 33% and EMA-smoothing it was a dead end — see Phase 9. Across the whole project, only *reward-side* changes (and now, the spawn-distance curriculum) have ever produced a repeatable win; every purely structural reflex tweak has failed.
+- **The single most important methodology point**: raw training reward (`log.csv` mean/max) is actively misleading in this environment and cannot be trusted on its own. Physics-only success rate — the fraction of fresh episodes where the worm's distance to food drops below 0.15 units at some point, measured directly from simulator state — is the only metric ever used to rank configs. This distinction mattered enormously and is the reason several early "great results" turned out to be nothing at all (see Phase 0 and Phase 3).
+- **Now following a shared team plan** (`FORAGING_FORWARD_PLAN.md`, Sonja + Luka) rather than ad-hoc exploration — see the dedicated section below for what's changed as a result.
 
 ## How the reflex works, briefly
 
@@ -119,6 +123,84 @@ Added three new opt-in reward terms to `envs.py` (`progress_reward_weight`, `ali
 
 **Current plan**: since the combination didn't produce a new best result, focus is on tuning item 2 and item 4 independently rather than trying further new mechanisms.
 
+## Phase 8 — Three more structural tweaks ("give the worm more information"): all failed to beat baseline
+
+All isolated tests (fixed reflex, no reward changes, same conditions as the 23% `gain16x` baseline):
+
+| Idea | What it was | Result |
+|---|---|---|
+| Phase-aware gain modulation | Boost/damp the correction continuously based on whether it currently has real leverage over NCAP's own oscillator cycle (Step 12 found this leverage is *exactly zero* during half the cycle — a softer, graduated successor to the old hard phase gate) | **23% — exactly baseline** |
+| Distance-scaled gain | Boost gain while food is far (faster convergence before the "runway" runs out), ease off once close | **23% — exactly baseline** |
+| Learnable `adapt_strength` | Item 4's own modulation strength as an `nn.Parameter`, with the straight-through gradient fix applied *proactively* this time. The parameter genuinely moved (0.5 → 0.471 over 20k steps, ~6%, vs. item 1's <0.5%) — confirms the fix works | **30%** — still worse than just hard-coding 0.5 (43%) |
+
+**Bigger-picture pattern, now confirmed across two full sessions: only reward-side changes have ever produced a repeatable win over baseline** (alignment 47%, progress/item2/item4 ~43%). **Every purely structural reflex tweak has failed** — original phase gate, bang-bang, deadband, sharpened alignment (Phase 0-4), and now all three of the above. 47% is not being accepted as a final answer — work has shifted back to the reward side.
+
+## Phase 9 (in progress) — Back to the reward side, with a twist
+
+A useful realization while planning this phase: the "no memory in the policy" constraint that blocked a true recurrent version of item 4 does **not** apply to the reward function. `Swim.get_reward()` already keeps state across steps (`self._prev_target_dist`) and runs once per real step during rollout collection — *before* anything enters PPO's shuffled minibatches. So reward-side memory (e.g. smoothing a noisy signal over recent steps) is safe, even though the same idea inside the policy wasn't.
+
+**Idea 1 — velocity-alignment reward**: the existing `alignment_reward_weight` measures the *nose's* orientation, but the nose is known to sweep 30-60° every stroke from gait wobble alone (Step 9) even when net heading is fine — and it's *net displacement direction*, not nose pose, that actually determines success (Steps 27-29). New `velocity_alignment_reward_weight` rewards the cosine similarity between the head's own velocity vector and the direction to food instead — an instantaneous proxy much closer to the thing that's actually been shown to matter.
+- **weight=0.5: 33%** — a real improvement over the 23% no-shaping baseline, but below plain nose-alignment's 47%. Likely because velocity, being a derivative-like quantity, is *more* exposed to gait-stroke noise than pose is — the same reason the original D-term attempt with omega failed (Step 9), not less as first assumed.
+
+**Idea 2 — EMA-smooth the alignment signal**: average the (velocity-based) alignment signal over recent steps instead of using it raw, to filter the gait-wobble noise directly. Safe to keep state for this (unlike inside the policy/reflex) since `get_reward()` runs once per real step before anything reaches PPO's shuffled minibatches.
+- alpha=0.02 (slow smoothing): **23%**
+- alpha=0.2 (fast smoothing): **20%**
+- Both worse than the 33% raw (unsmoothed) version at both tested strengths — **a dead end regardless of degree**, not a tuning problem. Likely a distinct failure mode from the minibatch-shuffling issue: averaging a *reward* over recent steps dilutes which action gets credited for the outcome ("credit-assignment lag"), which is a different problem from the policy-side memory constraint that motivated trying this in the first place.
+
+**Idea 3 (front-loading the reward early in the episode) was not run** — deprioritized once the team's shared `FORAGING_FORWARD_PLAN.md` (see below) redirected effort toward the fixed-distance spawn curriculum instead.
+
+---
+
+## Structural bug found: `forward`/`lateral` are swapped in `make_foraging_reflex`
+
+While reading teammate Luka's `foraging_with_neural_reuse` branch (which uses the opposite indexing, with an explicit justification in its comments), a check against the live simulator confirmed **our own reflex's `forward`/`lateral` axis labels are swapped relative to the true physical axes** — not just a naming quibble, a real bug in the steering law.
+
+**How it was verified** (not taken on faith from Luka's comment): placed the food at known egocentric offsets and read the *actual* observation array via `env.task.get_observation(physics)`, cross-checked against the project's own long-established, always-correct `forward_velocity = -physics.named.data.sensordata['head_vel'][1]` convention from the base swim reward. Confirmed: observation component 0 is the local **lateral** (x) axis, component 1 is local **longitudinal** (y, true forward = **-y**) — the opposite of what `reflex_steering.py`'s `forward = to_target[...,0]` / `lateral = to_target[...,1]` assumes.
+
+Plugging the confirmed raw values into the reflex's actual `atan2(-lateral, forward)` formula gives a clean, consistent **90-degree rotation error** across all four cardinal cases (dead-ahead food reads as 90°, dead-lateral reads as 0°, dead-behind reads as -90°, other-lateral reads as -180°). This predates this whole project — inherited from the original codebase, not introduced by any change in this branch.
+
+**Why this doesn't invalidate the project's own world-frame diagnostics** (the "angle-off predicts success" finding from Steps 27-29, used in every `comprehensive_sweep.py`-style check all along): those diagnostics reconstruct the true world-frame bearing by rotating the *raw* `[obs[0], obs[1]]` pair through `head_orientation`, in their original order — an operation that is correct regardless of what the reflex's own code chooses to *name* each component. So the diagnostics have been measuring the real thing all along; it's specifically the reflex's own internal steering angle that has been wrong.
+
+**Not yet fixed, on purpose**: fixing this at the same time as the fixed-distance spawn curriculum (below) would confound two effects in one training run. Plan is to test it as its own isolated ablation once there's a stable baseline to compare against — still open.
+
+---
+
+## Adopting the shared team plan (`FORAGING_FORWARD_PLAN.md`)
+
+Sonja + Luka's shared forward plan formalizes scope going forward: physics metrics only (never training reward) for every decision, one change at a time, train on controlled spawn distance / evaluate on stock spawn as the generalization check, and MLP is a ceiling reference only — not a priority to keep retraining. Emmanuel + Lorenzo's branches (their own separate pirouette/run-and-tumble direction) are out of scope; Luka's circuit-steering branch is the other half of the planned controller bake-off.
+
+### Phase 0 — Shared eval protocol
+
+Built `src/macrocircuits/evaluation.py`: a shared physics-only eval module both Sonja and Luka can call on any trained checkpoint. Reads **ground-truth simulator state** (`physics.nose_to_target_dist()`, a dedicated eat counter added to `Swim`) rather than any controller's own internal observation slicing — deliberately independent of the axis-label bug above. Reports near-food (`min_dist<0.15`) and true-eat (`min_dist<food_size`) rates, stratified by start-distance/start-angle bins, mean ± 95% CI across seeds.
+
+**Stock-spawn read (n=60: 2 seeds x 30 episodes each, no MLP)**:
+
+| Arm | near_food | true_eat |
+|---|---|---|
+| floor (`controller=None`) | 25.0% ± 11.0 | 0% |
+| current-best (reflex + alignment, the 47% config above) | 26.7% ± 11.3 | 0% |
+
+**These are statistically indistinguishable** — a long way from the 47% recorded above. Not believed to be a harness bug (the respawn code path never even fired in either arm's 60 episodes, and the rollout mechanics match the historical `comprehensive_sweep.py` pattern exactly). Most likely explanation: the original 47% came from a single seed x 30 episodes, and the plan document itself already flags "SE ≈ 9% at 47%" for that measurement — wide enough that landing near 47% while the true rate sits around 25-30% is entirely plausible. This is the exact failure mode Phase 0 exists to catch. Not further resolved with more seeds (judgment call: accept the noisy read and move on rather than spend ~1-3 more hours of eval compute) — left as an open flag rather than a settled correction.
+
+### Phase 1 — Fixed-distance spawn curriculum
+
+Ported Luka's `target_distance` mechanism into `envs.py`'s `Swim` class (`_place_target`): pins the target to a fixed distance at a random bearing instead of dm_control's wide random-box spawn, with automatic local-nose respawn during multi-pellet foraging once `target_distance` is set. `target_distance=None` preserves the exact stock behavior. (Separately, `progress_reward_weight` already implemented Luka's signed-progress reward design correctly — nothing needed porting there.)
+
+Tested directly on `foraging` (skipping the plan's suggested `swim_to_ball` debugging detour, since the team's actual focus is foraging) at a fixed spawn distance of 0.8, same reward config as the 47%/26.7% "current-best" arm:
+
+| Arm | Trained @ | Evaluated @ | near_food (n=60) |
+|---|---|---|---|
+| floor | fixed 0.8 | fixed 0.8 | 10.0% ± 7.7 |
+| floor | fixed 0.8 | stock spawn | 25.0% ± 11.0 |
+| reflex + alignment | fixed 0.8 | fixed 0.8 | **60.0% ± 12.5** |
+| reflex + alignment | fixed 0.8 | stock spawn | **40.0% ± 12.5** |
+
+**Large jump** (the plan's own decision-rule term): the reflex arm more than doubled in-distribution (26.7% -> 60%), and floor did not improve — it got *worse* (25% -> 10%), since a fixed moderate distance removes the "lucky, nearly-adjacent stock spawn" free wins floor was otherwise living off. This is a clean control: the same manipulation helps the arm that can actually use directional information and hurts the one that can't, so it isn't just "closer targets are easier for everyone." The gain partially generalizes back to stock spawn too (40% vs floor's 25% there) — a real edge, not pure overfitting to the fixed distance. All of this with the axis-label bug above still unfixed.
+
+**MLP ceiling**: explicitly deprioritized per team decision — not worth spending training time on until the NCAP side (reflex vs. Luka's circuit-steering) is settled; trivial to add back later. A far-better-trained MLP checkpoint (500k steps) already exists on a teammate's `obstacles-foraging-no-controller` worktree if a ceiling number is wanted without retraining, though it was trained under the stock combined reward rather than this project's isolated food-seeking setup.
+
+**Next**: lock in the plan's Phase 2 team-default reward (signed progress, demoting alignment to reference-only) before the actual Phase 3 controller bake-off (reflex vs. Luka's circuit-steering vs. floor, no MLP for now). The axis-label bug fix is still an open, deliberately-deferred ablation.
+
 ---
 
 ## Current best config
@@ -129,7 +211,7 @@ dict(network='ncap', task='foraging', controller='foraging',
      swimmer_kwargs=dict(include_speed_control=True))
 # angle_gain=16.0, rate_gain=112.0 (make_foraging_reflex's defaults)
 ```
-**47% physics-only success (14/30 fresh episodes)** — still the best found, and still not solved (53% of episodes fail).
+**47% physics-only success (14/30 fresh episodes)** — the original single-seed measurement. **Caveat, not yet resolved**: a proper multi-seed re-check (n=60, 2 seeds x 30 episodes, see Phase 0 above) measured this same config at 26.7% ± 11.3 on stock spawn, statistically tied with the no-steering floor (25.0% ± 11.0). Most likely explanation is that the original 47% was noisy (single seed, plan's own SE ≈ 9% estimate), not that the reflex does nothing — the same config under a fixed-distance spawn curriculum (Phase 1) shows a clear, well-controlled 60% in-distribution / 40% stock-generalization result that floor does not share. Treat "47%" as provisional pending the team's Phase 3 bake-off, not as settled.
 
 ## Open questions
 
@@ -137,5 +219,7 @@ dict(network='ncap', task='foraging', controller='foraging',
 - Why do independently-good changes so consistently fail to stack? Checked directly at least 4 separate times (progress+align+eaten, align+no-weight-sharing, item4+alignment) — never fully explained.
 - Learnable gains (item 1) needs multi-seed evaluation to properly settle whether it helps at all — not yet done.
 - The gait's own baked-in curvature (Phase 3-4) has never been directly addressed, only worked around via better steering/reward — an open structural question about the base circuit.
+- **The `forward`/`lateral` axis-label bug is still unfixed.** Once there's a stable baseline (post Phase 2/3), test the fix as its own isolated ablation — open question is whether correcting it helps, hurts, or does nothing (PPO's other free parameters may already be partially compensating for the consistent 90-degree error).
+- **Is 47% real?** The multi-seed re-check ties it with floor at n=60; the fixed-distance curriculum result suggests the reflex does do something real, but the two findings haven't been fully reconciled with a large enough shared sample size yet.
 
 *Full blow-by-blow detail, including every measurement bug and retraction preserved for provenance, lives in the project's running memory log — ask if you want the unabridged version.*
