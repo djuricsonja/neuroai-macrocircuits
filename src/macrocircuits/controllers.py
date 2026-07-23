@@ -10,17 +10,19 @@ vector unused unless something turns it into the circuit's `right_control` /
 |---|---|---|
 | `None` | nothing -- the circuit swims straight, only its reward changes | -- |
 | `'foraging'` / `'obstacle_avoidance'` | a fixed reflex (`reflex_steering`) | no |
+| `'foraging_learnable'` | the foraging reflex's formula, gains learned (`LearnableForagingReflex`) | partly |
 | `'mlp_foraging'` / `'mlp_obstacle_avoidance'` | a small MLP (`MLPController`) | yes |
 
 That is the comparison the tasks exist for: how much of the steering has to be learned
 once the swimming itself is given by the architecture.
 
-All three are the same shape to the rest of the code -- a callable
+All of these are the same shape to the rest of the code -- a callable
 `controller(observations) -> (right, left, speed)`, each `(..., 1)` in `[0, 1]`, or
-`None`. The reflexes are plain closures; `MLPController` is an `nn.Module`, so
-assigning it to `SwimmerActor.controller` (RL) or `NCAPSwimmerPolicy.controller` (ES)
-registers it as a submodule and its parameters are trained/evolved along with the
-circuit's own. Nothing else has to know which kind it got.
+`None`. The fixed reflexes are plain closures; `LearnableForagingReflex` and
+`MLPController` are `nn.Module`s, so assigning either to `SwimmerActor.controller` (RL)
+or `NCAPSwimmerPolicy.controller` (ES) registers it as a submodule and its parameters
+are trained/evolved along with the circuit's own. Nothing else has to know which kind
+it got.
 """
 
 import torch
@@ -29,6 +31,8 @@ import torch.nn as nn
 from macrocircuits.envs import TASKS
 from macrocircuits.reflex_steering import (
     make_foraging_reflex,
+    make_foraging_reflex_adaptive,
+    make_foraging_reflex_learnable,
     make_obstacle_avoidance_reflex,
 )
 
@@ -109,6 +113,8 @@ def make_obstacle_avoidance_mlp(n_joints, hidden_size=16):
 # choices are comparable on one environment.
 CONTROLLERS = {
     'foraging': ('make_foraging_reflex', ('foraging', 'swim_to_ball')),
+    'foraging_learnable': ('make_foraging_reflex_learnable', ('foraging', 'swim_to_ball')),
+    'foraging_adaptive': ('make_foraging_reflex_adaptive', ('foraging', 'swim_to_ball')),
     'obstacle_avoidance': ('make_obstacle_avoidance_reflex', ('evasion',)),
     'mlp_foraging': ('make_foraging_mlp', ('foraging', 'swim_to_ball')),
     'mlp_obstacle_avoidance': ('make_obstacle_avoidance_mlp', ('evasion',)),
