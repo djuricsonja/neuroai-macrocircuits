@@ -27,7 +27,10 @@ from macrocircuits.controllers import (
     make_foraging_mlp,
     make_foraging_reflex,
     make_foraging_reflex_adaptive,
+    make_foraging_reflex_adaptive_learnable,
+    make_foraging_reflex_distance_scaled,
     make_foraging_reflex_learnable,
+    make_foraging_reflex_phase_aware,
     make_obstacle_avoidance_mlp,
     make_obstacle_avoidance_reflex,
 )
