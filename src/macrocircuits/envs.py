@@ -122,11 +122,15 @@ class Swim(swimmer.Swimmer):
         progress_reward_weight=0.0,
         alignment_reward_weight=0.0,
         alignment_gated_progress_weight=0.0,
+        velocity_alignment_reward_weight=0.0,
+        velocity_alignment_ema_reward_weight=0.0,
+        velocity_alignment_ema_alpha=0.02,
         eaten_bonus=0.0,
         obstacle_penalty_weight=1.0,
         obstacle_safe_distance=0.4,
         obstacle_min_distance=0.5,
         food_size=0.02,
+        target_distance=None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -140,18 +144,55 @@ class Swim(swimmer.Swimmer):
         self._progress_reward_weight = progress_reward_weight
         self._alignment_reward_weight = alignment_reward_weight
         self._alignment_gated_progress_weight = alignment_gated_progress_weight
+        self._velocity_alignment_reward_weight = velocity_alignment_reward_weight
+        self._velocity_alignment_ema_reward_weight = velocity_alignment_ema_reward_weight
+        self._velocity_alignment_ema_alpha = velocity_alignment_ema_alpha
+        self._velocity_alignment_ema = None
         self._eaten_bonus = eaten_bonus
         self._obstacle_penalty_weight = obstacle_penalty_weight
         self._obstacle_safe_distance = obstacle_safe_distance
         self._obstacle_min_distance = obstacle_min_distance
         self._food_size = food_size
+        self._target_distance = target_distance
         self._prev_target_dist = None
+
+    def _place_target(self, physics, around=None):
+        """Reposition the target; `around` is the (x, y) to place it relative to.
+
+        With `target_distance` set, the target goes at exactly that distance and a
+        uniformly random bearing -- around the origin at episode start, around the
+        worm's nose when a pellet respawns. Fixing the distance makes every episode
+        a comparable navigation problem: dm_control's stock spawn samples a wide box,
+        so steering is irrelevant when the target lands almost on top of the worm and
+        near-hopeless when it lands far away (ported from Luka's
+        foraging_with_neural_reuse branch). None keeps the stock behaviour, which is
+        what a generalisation check should evaluate on.
+        """
+        if self._target_distance is not None:
+            angle = self.random.uniform(0, 2 * np.pi)
+            origin_x, origin_y = (0.0, 0.0) if around is None else (around[0], around[1])
+            xpos = origin_x + self._target_distance * np.cos(angle)
+            ypos = origin_y + self._target_distance * np.sin(angle)
+        elif around is None:
+            return  # keep dm_control's own episode-start placement
+        else:
+            xpos, ypos = self.random.uniform(-1.5, 1.5, size=2)
+        physics.named.model.geom_pos['target', 'x'] = xpos
+        physics.named.model.geom_pos['target', 'y'] = ypos
+        physics.named.model.light_pos['target_light', 'x'] = xpos
+        physics.named.model.light_pos['target_light', 'y'] = ypos
 
     def initialize_episode(self, physics):
         # disabled = bool(physics.model.opt.disableflags & mujoco.mjtDisableBit.mjDSBL_CONTACT)
         # print('contact globally disabled:', disabled)
 
         self._prev_target_dist = None  # fresh episode -- no prior-step distance yet
+        self._velocity_alignment_ema = None  # fresh episode -- no smoothing history yet
+        # Ground-truth eat counter for eval (Phase 0 shared protocol). Not part of the
+        # observation/reward contract -- a respawn moves the target before an eval loop
+        # reading physics *after* env.step() returns can see the pre-respawn distance, so
+        # "true eat" (dist < food_size) can't be reconstructed from outside afterwards.
+        self._episode_n_eaten = 0
 
         if self._enable_foraging or self._enable_single_target:
             # Skip Swim's target-hiding step; call the grandparent (stock Swimmer)
@@ -159,6 +200,7 @@ class Swim(swimmer.Swimmer):
             super(Swim, self).initialize_episode(physics)
             if self._enable_foraging:
                 physics.named.model.geom_size['target', 0] = self._food_size
+            self._place_target(physics)  # no-op unless target_distance is set
         else:
             super().initialize_episode(physics)
             physics.named.model.mat_rgba['target', 'a'] = 0
@@ -261,13 +303,61 @@ class Swim(swimmer.Swimmer):
             if self._alignment_gated_progress_weight and progress is not None and alignment is not None:
                 reward += self._alignment_gated_progress_weight * progress * max(alignment, 0.0)
 
+            # Velocity-alignment reward: reward the head's own *velocity direction*
+            # pointing at the food, rather than its nose orientation (what
+            # `alignment` above measures). These are not the same thing -- the
+            # debugging saga confirmed the head/nose sweeps 30-60 degrees every
+            # stroke from gait wobble alone even when net heading is fine (an
+            # undulating swimmer's own gait, not the reflex), while what actually
+            # determines success is net *displacement* direction, confirmed
+            # separately and repeatedly. Tested alone (weight=0.5): 33% physics-only
+            # success, a real improvement over the 23% baseline but below plain
+            # nose-alignment's 47% -- likely because velocity, being a derivative-like
+            # quantity, is *more* exposed to gait-stroke noise than pose is, the same
+            # reason the original D-term attempt with omega failed (Step 9), not less
+            # as first assumed.
+            velocity_alignment = None
+            if (self._velocity_alignment_reward_weight or self._velocity_alignment_ema_reward_weight) and dist > 1e-6:
+                head_vel = physics.body_velocities()[:2]  # head's own local (vx, vy)
+                speed = np.linalg.norm(head_vel)
+                if speed > 1e-6:
+                    velocity_alignment = np.dot(to_target[:2], head_vel) / (dist * speed)
+            if self._velocity_alignment_reward_weight and velocity_alignment is not None:
+                reward += self._velocity_alignment_reward_weight * velocity_alignment
+
+            # EMA-smoothed velocity-alignment reward: same signal as above, but
+            # averaged over recent steps instead of used raw, to filter out the
+            # gait-stroke-frequency noise directly rather than reward an
+            # instantaneous, wobble-corrupted sample of it. Safe to keep state for
+            # here (unlike inside the policy/reflex): this runs once per real step
+            # during rollout collection, before anything reaches PPO's shuffled
+            # minibatches, so step-order-dependent state is not a problem the way it
+            # would be for a stateful reflex (see LearnableAdaptiveForagingReflex's
+            # docstring, or the phase-gate discussion in reflex_steering.py).
+            # alpha ~= 1/oscillator_period keeps the EMA's effective averaging window
+            # comparable to one full gait cycle (default oscillator_period=60), so the
+            # cycle's own alternating push/pull on velocity direction has a chance to
+            # cancel out rather than dominate the signal.
+            if self._velocity_alignment_ema_reward_weight and velocity_alignment is not None:
+                if self._velocity_alignment_ema is None:
+                    self._velocity_alignment_ema = velocity_alignment
+                else:
+                    alpha = self._velocity_alignment_ema_alpha
+                    self._velocity_alignment_ema = (
+                        alpha * velocity_alignment + (1 - alpha) * self._velocity_alignment_ema
+                    )
+                reward += self._velocity_alignment_ema_reward_weight * self._velocity_alignment_ema
+
             self._prev_target_dist = dist
 
             if dist < target_size:  # worm reached the food -- respawn it
                 reward += self._eaten_bonus
-                xpos, ypos = self.random.uniform(-1.5, 1.5, size=2)
-                physics.named.model.geom_pos['target', 'x'] = xpos
-                physics.named.model.geom_pos['target', 'y'] = ypos
+                self._episode_n_eaten += 1
+                # With target_distance set, respawn near the nose (keeps the next
+                # pellet local instead of dropping it across the arena); with it
+                # unset, falls back to the stock uniform-box respawn as before.
+                self._place_target(physics, around=physics.named.data.geom_xpos['nose'][:2])
+                physics.forward()
                 # Re-measure against the newly-spawned target so next step's progress
                 # reward reflects real motion relative to it, not the jump caused by
                 # this respawn (which would otherwise look like the worm suddenly
@@ -327,11 +417,17 @@ def swim_to_ball(
     enable_foraging=False,
     enable_obstacles=False,
     n_obstacles=3,
+    target_distance=None,
     time_limit=swimmer._DEFAULT_TIME_LIMIT,
     random=None,
     environment_kwargs={},
 ):
-    """Returns the Swim task, with optional foraging and obstacle avoidance."""
+    """Returns the Swim task, with optional foraging and obstacle avoidance.
+
+    target_distance: pin the target to this distance at a random bearing instead
+    of dm_control's random box spawn -- see Swim._place_target. None keeps the
+    stock behaviour, which is what a generalisation check should evaluate on.
+    """
     model_string, assets = get_model_and_assets(
         n_links, n_obstacles=n_obstacles if enable_obstacles else 0
     )
@@ -342,6 +438,7 @@ def swim_to_ball(
         enable_foraging=enable_foraging,
         enable_obstacles=enable_obstacles,
         n_obstacles=n_obstacles,
+        target_distance=target_distance,
         random=random,
     )
     return control.Environment(
@@ -362,7 +459,11 @@ def foraging(
     progress_reward_weight=0.0,
     alignment_reward_weight=0.0,
     alignment_gated_progress_weight=0.0,
+    velocity_alignment_reward_weight=0.0,
+    velocity_alignment_ema_reward_weight=0.0,
+    velocity_alignment_ema_alpha=0.02,
     eaten_bonus=0.0,
+    target_distance=None,
     time_limit=swimmer._DEFAULT_TIME_LIMIT,
     random=None,
     environment_kwargs={},
@@ -376,9 +477,14 @@ def foraging(
     reward.
 
     progress_reward_weight, alignment_reward_weight, alignment_gated_progress_weight,
-    eaten_bonus all default to 0 (opt-in, same reasoning as speed_reward_weight --
-    don't change behavior for existing configs). See Swim.get_reward for what each one
-    actually computes.
+    velocity_alignment_reward_weight, velocity_alignment_ema_reward_weight, eaten_bonus
+    all default to 0 (opt-in, same reasoning as speed_reward_weight -- don't change
+    behavior for existing configs). See Swim.get_reward for what each one actually
+    computes.
+
+    target_distance: pin each pellet to this distance at a random bearing (from
+    the worm's nose on respawn) instead of dm_control's random box spawn -- see
+    Swim._place_target. None keeps the stock behaviour.
     """
     model_string, assets = get_model_and_assets(
         n_links, n_obstacles=n_obstacles if enable_obstacles else 0
@@ -394,7 +500,11 @@ def foraging(
         progress_reward_weight=progress_reward_weight,
         alignment_reward_weight=alignment_reward_weight,
         alignment_gated_progress_weight=alignment_gated_progress_weight,
+        velocity_alignment_reward_weight=velocity_alignment_reward_weight,
+        velocity_alignment_ema_reward_weight=velocity_alignment_ema_reward_weight,
+        velocity_alignment_ema_alpha=velocity_alignment_ema_alpha,
         eaten_bonus=eaten_bonus,
+        target_distance=target_distance,
         random=random,
     )
     return control.Environment(
