@@ -28,7 +28,10 @@ from macrocircuits.controllers import (
     make_foraging_reflex,
     make_obstacle_avoidance_mlp,
     make_obstacle_avoidance_reflex,
-    make_foraging_naive_piourette
+    make_foraging_naive_piourette,
+    make_foraging_mlp_piourette,
+    make_foraging_mlp_reflex, 
+    make_foraging_mlp_reflex_piourette
 )
 
 # Imported so that the code strings passed to train() and stored in config.yaml --

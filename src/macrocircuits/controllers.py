@@ -23,6 +23,9 @@ registers it as a submodule and its parameters are trained/evolved along with th
 circuit's own. Nothing else has to know which kind it got.
 """
 
+
+TAU = 5
+
 import torch
 import torch.nn as nn
 
@@ -30,6 +33,15 @@ from macrocircuits.envs import TASKS
 from macrocircuits.reflex_steering import (
     make_foraging_reflex,
     make_obstacle_avoidance_reflex,
+)
+
+from macrocircuits.constraints import (
+    excitatory_uniform, 
+    inhibitory_uniform, 
+    unsigned_uniform,
+    excitatory,
+    inhibitory,
+    unsigned
 )
 
 
@@ -47,16 +59,8 @@ class NaivePiouretteController(nn.Module):
         self.counter = 0
         self.n_joints = n_joints
         self.state_fn = state_fn
-        self.register_buffer(
-            "concentration",
-            torch.zeros((2,)),
-            persistent=True
-        )
-        self.register_buffer(
-            "controls",
-            torch.tensor([0.0, 0.0, 1.0]),  # start swimming straight, not stalled
-            persistent=True
-        )
+        self.concentration = torch.zeros((2,))
+        self.controls = torch.tensor([0.0, 0.0, 1.0])
         self.dist = torch.distributions.Uniform(0.0, 1.0)
 
     def forward(self, observations, n_joints=None):
@@ -89,9 +93,9 @@ class NaivePiouretteController(nn.Module):
                 self.counter = 0
 
             left, right, speed = self.controls
-            return left, right, speed
+            return right, left, speed
         
-def make_foraging_naive_piourette(n_joints, tau=10):
+def make_foraging_naive_piourette(n_joints, tau=TAU):
     return NaivePiouretteController(n_joints, state_fn=distance_to_food_target, tau=tau)
 
 
@@ -149,10 +153,188 @@ istance_to_food_target
         return right, left, speed
 
 
+
+class MLPBased_PiouretteController(NaivePiouretteController):
+
+    def __init__(self, n_joints, state_fn=foraging_state, tau=20):
+        super().__init__(n_joints, state_fn, tau)
+        # self.weight = nn.Parameter(torch.zeros((self.n_joints + 2, 3)))
+        self.weight = excitatory_uniform((self.n_joints + 2, 3))
+        self.tau_layer = nn.Parameter(torch.zeros(self.n_joints + 2,))
+
+        self.prev_controls = torch.tensor([0., 0., 1.0])
+        # Per-env state, lazily (re)sized on first call / batch-size change.
+        self.counter_t = None
+        self.tau_t = None
+        self.prev_x = None
+        self.conc_gradient = None
+
+    def _ensure_batch_state(self, batch_size, device):
+        if self.counter_t is None or self.counter_t.shape[0] != batch_size:
+            self.counter_t = torch.zeros(batch_size, 1, device=device)
+            self.prev_x = torch.zeros(batch_size, 1, device=device)
+            self.conc_gradient = torch.zeros(batch_size, 1, device=device)
+            self.controls = torch.tensor([0., 0., 1.0], device=device).expand(batch_size, 3).clone()
+            self.prev_controls = self.controls.clone()
+
+    def forward(self, observations, n_joints=None):
+        with torch.no_grad():
+            obs = self.state_fn(observations, self.n_joints)
+            to_target = obs[:, self.n_joints:]
+            x = -torch.norm(to_target, dim=-1, keepdim=True)  # (batch, 1) per-env concentration
+
+            batch_size = obs.shape[0]
+            self._ensure_batch_state(batch_size, obs.device)
+
+            # Learned, per-env hold duration.
+            neg_conc_gradient = torch.relu(-1 * self.conc_gradient)
+            tau_t = torch.clamp(
+                torch.relu(neg_conc_gradient * (obs @ self.tau_layer).unsqueeze(-1)),
+                min=2, max=50,
+            )
+
+            # Per-env: has this env's hold timer expired?
+            due = self.counter_t >= tau_t
+
+            # Where due: recompute gradient from new baseline and reset; else: keep holding.
+            self.conc_gradient = torch.where(due, x - self.prev_x, self.conc_gradient)
+            self.prev_x = torch.where(due, x, self.prev_x)
+            self.prev_controls = torch.where(due, self.controls, self.prev_controls)
+            self.counter_t = torch.where(due, torch.zeros_like(self.counter_t), self.counter_t + 1)
+
+            self.tau_t = tau_t
+
+        neg_conc_gradient = torch.relu(-1 * self.conc_gradient)
+        time_constant = torch.relu(torch.exp(-1 * (tau_t - 1 - self.counter_t)))
+        self.controls = torch.sigmoid(
+            (neg_conc_gradient * time_constant * (obs @ excitatory(self.weight))) + self.prev_controls
+        )
+
+        left, right, speed = self.controls.split(1, dim=-1)
+        return right, left, speed
+
+
+# class MLPBased_PiouretteController(NaivePiouretteController):
+
+#     def __init__(self, n_joints, state_fn=foraging_state, tau=20):
+#         super().__init__(n_joints, state_fn, tau)
+#         self.weight = nn.Parameter(torch.zeros((self.n_joints + 2, 3)))
+#         self.conc_gradient = torch.tensor(-1E12)
+#         self.prev_controls = torch.tensor([0., 0., 1.0])
+
+#         self.tau_layer = nn.Parameter(torch.zeros(self.n_joints + 2,))
+#         self.learned_tau = None
+
+#     def _get_conc_gradient(self, observations):
+#         obs = self.state_fn(observations, self.n_joints)
+#         # print(obs.size())
+#         joints = obs[:, :self.n_joints]
+#         to_target = obs[:, self.n_joints:]
+
+#         # to_target = self.state_fn(observations, self.n_joints)
+#         # concentration proxy: negative distance, so higher = closer to food
+#         x = -torch.norm(to_target, dim=-1)
+#         if x.dim() > 0:
+#             x = x[-1]
+
+#         if (self.counter == 0) or (self.counter < int(self.tau)):
+#             if self.counter == 0:
+#                 self.concentration[0] = x
+#                 self.prev_controls = self.controls.clone().detach()
+#             self.counter += 1
+#         else:
+#             self.concentration[1] = x
+#             self.conc_gradient = torch.tensor(self.concentration[1] - self.concentration[0])
+#             self.counter = 0
+
+#         return torch.cat([joints, to_target], dim=-1), self.conc_gradient
+
+#     def _get_counter(self):
+#         return torch.tensor(self.counter)
+
+#     def forward(self, observations, n_joints=None):
+#         with torch.no_grad():
+#             obs, conc_gradient = self._get_conc_gradient(observations)
+#             batch_size = obs.shape[0]
+#             counter = self._get_counter()
+
+#             # if counter == 0:
+#             #     print(f"CONCENTRATION GRADIENT: {conc_gradient}")
+
+#              # Reset any batch-shaped state that doesn't match the current call's batch size
+#             # (Trainer alternates 4096-env training rollouts with single-env test episodes).
+#             if self.controls.dim() == 1 or self.controls.shape[0] != batch_size:
+#                 self.controls = torch.tensor([0., 0., 1.0]).expand(batch_size, 3).clone()
+#             if self.prev_controls.dim() == 1 or self.prev_controls.shape[0] != batch_size:
+#                 self.prev_controls = self.controls.clone().detach()
+
+#         neg_conc_gradient = torch.relu(-1 * conc_gradient)
+#         tau_val = torch.relu(neg_conc_gradient * (obs @ self.tau_layer))
+#         tau_val = torch.clamp(tau_val, min=2, max=50)
+#         time_constant = torch.relu(torch.exp(-1 * (tau_val - 1 - counter)))
+#         self.controls = torch.sigmoid((neg_conc_gradient * time_constant * (obs @ self.weight)) + self.prev_controls)
+#         # print(obs.size(), self.controls.size(), self.prev_controls.size())
+
+#         with torch.no_grad():
+#             self.learned_tau = tau_val
+
+#         left, right, speed = self.controls.split(1, dim=-1)
+#         return right, left, speed
+
+
+class MLPBased_ReflexController(nn.Module):
+
+    def __init__(self, n_joints, state_fn=foraging_state):
+        super().__init__()
+        self.n_joints = n_joints
+        self.state_fn = state_fn
+        self.weight = nn.Parameter(torch.zeros((self.n_joints + 2, 3)))
+
+    def forward(self, observations, n_joints=None):
+        with torch.no_grad():
+            x = self.state_fn(observations, self.n_joints)
+            # to_target = self.state_fn(observations, self.n_joints)
+            # x = to_target[-1]
+
+        y = torch.sigmoid(x @ self.weight)
+        left, right, speed = y.split(1, dim=-1)
+        return right, left, speed
+
+
+class MLP_Reflex_Piourette_Controller(nn.Module):
+
+    def __init__(self, n_joints, state_fn=foraging_state, tau=20):
+        super().__init__()
+
+        self.reflex_controller = MLPBased_ReflexController(n_joints, state_fn)
+        self.piourette_controller = MLPBased_PiouretteController(n_joints, state_fn, tau)
+
+        self.n_joints = n_joints
+        self.state_fn =state_fn
+        self.mixer_layer = nn.Linear(6, 3)
+
+    def forward(self, observations, n_joints=None):
+        r1, l1, s1 = self.reflex_controller(observations)
+        r2, l2, s2 = self.piourette_controller(observations)
+
+        x = torch.cat([r1, r2, l1, l2, s1, s2], dim=-1)
+        right, left, speed = torch.sigmoid(self.mixer_layer(x)).split(1, dim=-1)
+
+        return right, left, speed
+
+
 def make_foraging_mlp(n_joints, hidden_size=16):
     """Learned counterpart of `make_foraging_reflex`: steer from the vector to the food."""
     return MLPController(n_joints, foraging_state, hidden_size=hidden_size)
 
+def make_foraging_mlp_piourette(n_joints, tau=TAU):
+    return MLPBased_PiouretteController(n_joints, state_fn=foraging_state, tau=tau)
+
+def make_foraging_mlp_reflex(n_joints):
+    return MLPBased_ReflexController(n_joints, state_fn=foraging_state)
+
+def make_foraging_mlp_reflex_piourette(n_joints, tau=TAU):
+    return MLP_Reflex_Piourette_Controller(n_joints, state_fn=foraging_state, tau=tau)
 
 def make_obstacle_avoidance_mlp(n_joints, hidden_size=16):
     """Learned counterpart of `make_obstacle_avoidance_reflex`: steer from the vector to
@@ -174,7 +356,10 @@ CONTROLLERS = {
     'obstacle_avoidance': ('make_obstacle_avoidance_reflex', ('evasion',)),
     'mlp_foraging': ('make_foraging_mlp', ('foraging', 'swim_to_ball')),
     'mlp_obstacle_avoidance': ('make_obstacle_avoidance_mlp', ('evasion',)),
-    'naive_piourette_foraging': ('make_foraging_naive_piourette', ('foraging', 'swim_to_ball'))
+    'naive_piourette_foraging': ('make_foraging_naive_piourette', ('foraging', 'swim_to_ball')),
+    'mlp_piourette_foraging': ('make_foraging_mlp_piourette', ('foraging', 'swim_to_ball')),
+    'mlp_reflex_foraging': ('make_foraging_mlp_reflex', ('foraging', 'swim_to_ball')),
+    'mlp_reflex_piourette_foraging': ('make_foraging_mlp_reflex_piourette', ('foraging', 'swim_to_ball')),
 }
 
 
