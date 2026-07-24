@@ -229,6 +229,9 @@ class Swim(swimmer.Swimmer):
                 sigmoid='long_tail',
             )
 
+            if self._enable_foraging_exp:
+                reward += self._conc_at_source * np.exp(-dist / self._decay_len)
+
             # Progress reward: dense per-step credit for the distance closed toward the
             # food since last step (potential-based shaping). Skipped on the episode's
             # first step and right after a respawn, so a target's sudden distance jump
