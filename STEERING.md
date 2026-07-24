@@ -49,6 +49,36 @@ hardcoded reflex up to a small learned controller. Everything here is additive o
 
 ---
 
+## The full grid (`forage_grid.ipynb`)
+
+3 models x 2 learning approaches, all at paper budgets (PPO 1e6 steps, ES 100
+generations x population 64). Trained 2026-07-24, 3.5 h, no failures.
+Physics-only success, 30 fresh episodes, eval seed 0:
+
+| model | given | untrained | PPO | ES |
+|---|---|---|---|---|
+| `mlp` | nothing | 7% | 10% | 13% |
+| `ncap` | swimming circuit, no turn input | 23% | 23% | 13% |
+| `ncap`+`learned_steering` | circuit + turn primitive | 80% | **93%** | **90%** |
+
+**The controller is worth more than the optimizer or the budget.** Adding steering is
++70 points; training adds at most +13; and 10x the budget bought nothing --
+`ncap_steer`+PPO scored 93% at 1e5 too.
+
+- The MLP-only baseline no longer has a budget excuse: at the paper's full 1e6 it is
+  still at its 7% untrained floor.
+- `ncap` is flat by construction (`include_turn_control=False`, so no turn input exists).
+  ES landing *below* its own untrained score is the reward/success decoupling this
+  project keeps hitting -- ES climbs the shaped reward and trades away the incidental
+  food-grazing that produced the 23%.
+- PPO and ES agree on the model that can steer (93 vs 90). The paper's own optimizer
+  does not beat PPO once the geometry is right.
+
+> Single eval seed, 30 episodes, ~+/-10% shift across seeds. Differences under ~4
+> episodes (the whole `mlp` row; `ncap`'s 23 vs 13) are not distinguishable from noise.
+
+---
+
 ## The convention
 
 Measured by placing food at a known bearing relative to the worm's actual heading and
