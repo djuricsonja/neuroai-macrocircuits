@@ -1,0 +1,12 @@
+after_training: null
+agent: tonic.torch.agents.PPO(model=ppo_mlp_model(actor_sizes=(256, 256), critic_sizes=(256,
+  256)), actor_updater=tonic.torch.updaters.ClippedRatio(gradient_clip=0.5), critic_updater=tonic.torch.updaters.VRegression(gradient_clip=0.5))
+before_training: null
+environment: 'tonic.environments.ControlSuite("swimmer-foraging", task_kwargs={''progress_reward_weight'':
+  10.0, ''eat_bonus'': 5.0})'
+header: import tonic.torch
+name: mlp_ppo_forage_poc
+parallel: 1
+seed: 0
+sequential: 1
+trainer: tonic.Trainer(steps=1000000, epoch_steps=20000, save_steps=50000)

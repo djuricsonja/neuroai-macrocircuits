@@ -1,0 +1,10 @@
+after_training: null
+agent: tonic.torch.agents.PPO(model=ppo_swimmer_model(n_joints=5,critic_sizes=(256,256)))
+before_training: null
+environment: tonic.environments.ControlSuite("swimmer-swim",time_feature=True)
+header: import tonic.torch
+name: ncap_ppo
+parallel: 1
+seed: 0
+sequential: 1
+trainer: tonic.Trainer(steps=int(1e5),save_steps=int(5e4))

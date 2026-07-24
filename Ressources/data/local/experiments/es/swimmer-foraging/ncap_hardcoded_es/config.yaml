@@ -1,0 +1,21 @@
+best_reward: 626.6792613408018
+controller: steer_to_food
+controller_kwargs: {}
+hidden_sizes:
+- 64
+- 64
+lr: 0.02
+n_evals: 1
+n_links: 6
+n_steps: 100
+network: ncap
+population_size: 64
+seed: 0
+sigma: 0.02
+swimmer_kwargs:
+  include_speed_control: true
+task: foraging
+task_kwargs:
+  alignment_reward_weight: 0.5
+  speed_reward_weight: 0.0
+weight_decay: 0.0

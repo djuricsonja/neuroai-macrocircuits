@@ -2,9 +2,12 @@
 # SETUP/requirements.lock is generated but IS committed -- it is the shared pin set.
 .venv/
 
-# tonic is git-cloned by the notebook at runtime, not vendored
-tonic/
-Ressources/tonic/
+# tonic is git-cloned by the notebook at runtime, not vendored. Anchored with a leading
+# slash so it only ignores the clone at these locations, NOT the `tonic` subfolder inside
+# data/local/experiments/tonic/ where the training runs live.
+/tonic/
+/Ressources/tonic/
+/scripts/tonic/
 
 # Notebook + rendering artifacts
 output_videos/
@@ -22,6 +25,3 @@ Thumbs.db
 
 # Claude related files
 CLAUDE.md
-
-# Training runs and logs
-Ressources/data/

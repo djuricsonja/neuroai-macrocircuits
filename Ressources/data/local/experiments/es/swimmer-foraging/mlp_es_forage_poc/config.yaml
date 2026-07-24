@@ -1,0 +1,20 @@
+best_reward: 249.04227907629553
+controller: null
+controller_kwargs: {}
+hidden_sizes:
+- 64
+- 64
+lr: 0.02
+n_evals: 1
+n_links: 6
+n_steps: 100
+network: mlp
+population_size: 64
+seed: 0
+sigma: 0.02
+swimmer_kwargs: {}
+task: foraging
+task_kwargs:
+  eat_bonus: 5.0
+  progress_reward_weight: 10.0
+weight_decay: 0.0
