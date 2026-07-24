@@ -117,6 +117,7 @@ class Swim(swimmer.Swimmer):
         enable_foraging=False,
         enable_obstacles=False,
         n_obstacles=3,
+        enable_foraging_exp=False,
         speed_reward_weight=1.0,
         target_reward_weight=1.0,
         progress_reward_weight=0.0,
@@ -127,12 +128,16 @@ class Swim(swimmer.Swimmer):
         obstacle_safe_distance=0.4,
         obstacle_min_distance=0.5,
         food_size=0.02,
+        conc_at_source=100,
+        decay_len=10,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self._desired_speed = desired_speed
         self._enable_single_target = enable_single_target
         self._enable_foraging = enable_foraging
+        self._enable_foraging_exp = enable_foraging_exp
+        
         self._enable_obstacles = enable_obstacles
         self._n_obstacles = n_obstacles if enable_obstacles else 0
         self._speed_reward_weight = speed_reward_weight
@@ -145,6 +150,8 @@ class Swim(swimmer.Swimmer):
         self._obstacle_safe_distance = obstacle_safe_distance
         self._obstacle_min_distance = obstacle_min_distance
         self._food_size = food_size
+        self._conc_at_source = conc_at_source
+        self._decay_len = decay_len
         self._prev_target_dist = None  # for the per-step progress reward
 
     def initialize_episode(self, physics):
@@ -153,7 +160,7 @@ class Swim(swimmer.Swimmer):
 
         self._prev_target_dist = None  # fresh episode: no previous-step distance yet
 
-        if self._enable_foraging or self._enable_single_target:
+        if self._enable_foraging or self._enable_single_target or self._enable_foraging_exp:
             # Skip Swim's target-hiding step; call the grandparent (stock Swimmer)
             # directly so the target is randomly placed AND stays visible.
             super(Swim, self).initialize_episode(physics)
@@ -355,10 +362,10 @@ def foraging(
     enable_obstacles=False,
     n_obstacles=3,
     speed_reward_weight=0.0,
-    progress_reward_weight=0.0,
-    alignment_reward_weight=0.0,
-    alignment_gated_progress_weight=0.0,
-    eat_bonus=0.0,
+    progress_reward_weight=1.0,
+    alignment_reward_weight=1.0,
+    alignment_gated_progress_weight=1.0,
+    eat_bonus=10.0,
     time_limit=swimmer._DEFAULT_TIME_LIMIT,
     random=None,
     environment_kwargs={},
@@ -380,6 +387,7 @@ def foraging(
         n_links, n_obstacles=n_obstacles if enable_obstacles else 0
     )
     physics = Physics.from_xml_string(model_string, assets=assets)
+    physics.model.opt.disableflags = 0
     task = Swim(
         desired_speed=desired_speed,
         enable_single_target=enable_single_target,
