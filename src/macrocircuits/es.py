@@ -118,6 +118,14 @@ class NCAPSwimmerPolicy(nn.Module):
         right, left, speed = (
             self.controller(observations) if self.controller else (None, None, None)
         )
+        # In-circuit steering reads the egocentric target vector itself, with no
+        # controller involved; it sits immediately after the joints in the observation
+        # (see Swim.get_observation). Same slice SwimmerActor uses on the RL path --
+        # guarded on the flag so the index is never misread on a task with no target.
+        if getattr(self.swimmer, 'include_target_steering', False):
+            target_vec = observations[..., self.n_joints:self.n_joints + 2]
+        else:
+            target_vec = None
         # timesteps=None -> use the module's internal counter for the oscillator;
         # log_activity=False -> don't accumulate connection records across the run.
         return self.swimmer(
@@ -126,6 +134,7 @@ class NCAPSwimmerPolicy(nn.Module):
             right_control=right,
             left_control=left,
             speed_control=speed,
+            target_vec=target_vec,
             log_activity=False,
         )
 
