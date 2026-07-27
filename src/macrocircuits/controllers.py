@@ -440,6 +440,12 @@ def make_learned_steering(n_joints, hidden_size=8, turn_strength=0.75, warm_star
     return LearnedSteering(n_joints, hidden_size=hidden_size, turn_strength=turn_strength,
                            warm_start=warm_start)
 
+def make_learned_steering_disable_warm_start(n_joints, hidden_size=8, turn_strength=0.75, warm_start=False):
+    """Option 5 controller -- learns the steering decision on top of the fixed turn
+    primitive, without warm-starting at the correct-sign hand solution. See `LearnedSteering`."""
+    return LearnedSteering(n_joints, hidden_size=hidden_size, turn_strength=turn_strength,
+                           warm_start=warm_start)
+
 # ==================================================================================================
 
 
@@ -473,6 +479,7 @@ CONTROLLERS = {
     'steer_to_food': ('make_steer_to_food_reflex', ('foraging', 'swim_to_ball')),
     # Learns only the steering decision on top of the fixed turn primitive (Option 5).
     'learned_steering': ('make_learned_steering', ('foraging', 'swim_to_ball')),
+    'learneed_steering_no_warm_start': ('make_learned_steering_disable_warm_start', ('foraging', 'swim_to_ball')),
 }
 
 
