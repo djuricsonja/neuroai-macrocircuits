@@ -43,7 +43,7 @@ from macrocircuits.plotting import (  # See src/macrocircuits/plotting.py.
 
 # --> Define TASK and experiment parameters
 TASK = 'foraging'
-STEPS = int(1E5)
+STEPS = int(2E6)
 
 # --> Define RUNS configuration
 print(f"Defining runs for {TASK.upper()} task")

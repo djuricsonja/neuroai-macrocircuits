@@ -106,6 +106,11 @@ class NaivePiouretteController(nn.Module):
 def make_foraging_naive_piourette(n_joints, tau=TAU):
     return NaivePiouretteController(n_joints, state_fn=distance_to_food_target, tau=tau)
 
+# ==================================================================================================
+
+
+
+
 
 # ==================================================================================================
 # Learned controllers.
@@ -159,6 +164,15 @@ istance_to_food_target
         out = torch.sigmoid(self.net(self.state_fn(observations, self.n_joints)))
         right, left, speed = out.split(1, dim=-1)  # each keeps shape (..., 1)
         return right, left, speed
+
+def make_foraging_mlp(n_joints, hidden_size=16):
+    """Learned counterpart of `make_foraging_reflex`: steer from the vector to the food."""
+    return MLPController(n_joints, foraging_state, hidden_size=hidden_size)
+
+def make_obstacle_avoidance_mlp(n_joints, hidden_size=16):
+    """Learned counterpart of `make_obstacle_avoidance_reflex`: steer from the vector to
+    the nearest obstacle."""
+    return MLPController(n_joints, obstacle_state, hidden_size=hidden_size)
 
 
 
@@ -291,6 +305,10 @@ class MLPBased_PiouretteController(NaivePiouretteController):
 #         left, right, speed = self.controls.split(1, dim=-1)
 #         return right, left, speed
 
+def make_foraging_mlp_piourette(n_joints, tau=TAU):
+    return MLPBased_PiouretteController(n_joints, state_fn=foraging_state, tau=tau)
+
+
 
 class MLPBased_ReflexController(nn.Module):
 
@@ -309,6 +327,10 @@ class MLPBased_ReflexController(nn.Module):
         y = torch.sigmoid(x @ self.weight)
         left, right, speed = y.split(1, dim=-1)
         return right, left, speed
+
+def make_foraging_mlp_reflex(n_joints):
+    return MLPBased_ReflexController(n_joints, state_fn=foraging_state)
+
 
 
 class MLP_Reflex_Piourette_Controller(nn.Module):
@@ -337,24 +359,9 @@ class MLP_Reflex_Piourette_Controller(nn.Module):
 
         return right, left, speed
 
-
-def make_foraging_mlp(n_joints, hidden_size=16):
-    """Learned counterpart of `make_foraging_reflex`: steer from the vector to the food."""
-    return MLPController(n_joints, foraging_state, hidden_size=hidden_size)
-
-def make_foraging_mlp_piourette(n_joints, tau=TAU):
-    return MLPBased_PiouretteController(n_joints, state_fn=foraging_state, tau=tau)
-
-def make_foraging_mlp_reflex(n_joints):
-    return MLPBased_ReflexController(n_joints, state_fn=foraging_state)
-
 def make_foraging_mlp_reflex_piourette(n_joints, tau=TAU):
     return MLP_Reflex_Piourette_Controller(n_joints, state_fn=foraging_state, tau=tau)
 
-def make_obstacle_avoidance_mlp(n_joints, hidden_size=16):
-    """Learned counterpart of `make_obstacle_avoidance_reflex`: steer from the vector to
-    the nearest obstacle."""
-    return MLPController(n_joints, obstacle_state, hidden_size=hidden_size)
 
 
 class LearnedSteering(nn.Module):
@@ -432,6 +439,11 @@ def make_learned_steering(n_joints, hidden_size=8, turn_strength=0.75, warm_star
     primitive, warm-started at the correct-sign hand solution. See `LearnedSteering`."""
     return LearnedSteering(n_joints, hidden_size=hidden_size, turn_strength=turn_strength,
                            warm_start=warm_start)
+
+# ==================================================================================================
+
+
+
 
 
 # ==================================================================================================
