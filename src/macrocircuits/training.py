@@ -120,7 +120,8 @@ _RUN_DEFAULTS = {
     'seed': 0,
     'task': 'swim',  # which environment to train in; see envs.TASKS.
     'task_kwargs': None,  # dm_control task options, e.g. dict(n_obstacles=10).
-    'controller': None,  # options forwarded to the controller factory.
+    'controller': None,  # steering controller for NCAP; see controllers.CONTROLLERS.
+    'controller_kwargs': None,  # options forwarded to the controller factory.
     'swimmer_kwargs': None,  # NCAP circuit options, e.g. dict(oscillator_period=60).
     'label': None,
     # -- tonic RL methods only ('ppo', 'a2c', 'trpo', 'ddpg', 'd4pg') --
@@ -283,6 +284,11 @@ def run_config(
                  weights are trained along with the circuit. None leaves the circuit
                  unsteered, as in the paper -- the baseline the steered runs are read
                  against. See macrocircuits.controllers.CONTROLLERS.
+    - controller_kwargs: options forwarded to the controller factory, e.g.
+                 dict(turn_strength=0.5, hidden_size=16) for 'learned_steering' or
+                 dict(angle_gain=8.0) for 'foraging'. Spelled into the agent source
+                 string, so they are recorded in config.yaml and two runs differing only
+                 in these are correctly seen as different runs by is_trained().
     - actor_sizes/critic_sizes: MLP torso widths. NCAP's actor is the fixed circuit,
                  so actor_sizes is used by the MLP baseline only; critic_sizes applies to both.
     - action_noise: exploration std. For the on-policy methods it is the std of the NCAP
