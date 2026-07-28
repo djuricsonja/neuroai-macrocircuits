@@ -27,6 +27,7 @@ from macrocircuits.controllers import (
     make_foraging_mlp,
     make_foraging_reflex,
     make_learned_steering,
+    make_learned_steering_disable_warm_start,
     make_obstacle_avoidance_mlp,
     make_obstacle_avoidance_reflex,
     make_foraging_naive_piourette,

@@ -479,7 +479,7 @@ CONTROLLERS = {
     'steer_to_food': ('make_steer_to_food_reflex', ('foraging', 'swim_to_ball')),
     # Learns only the steering decision on top of the fixed turn primitive (Option 5).
     'learned_steering': ('make_learned_steering', ('foraging', 'swim_to_ball')),
-    'learneed_steering_no_warm_start': ('make_learned_steering_disable_warm_start', ('foraging', 'swim_to_ball')),
+    'learned_steering_no_warm_start': ('make_learned_steering_disable_warm_start', ('foraging', 'swim_to_ball')),
 }
 
 

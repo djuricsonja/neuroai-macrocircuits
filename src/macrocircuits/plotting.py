@@ -60,6 +60,54 @@ def plot_performance(paths, ax=None, title='Model Performance'):
     ax.set_title(title)
 
 
+def plot_performance_ma(paths, ax=None, title='Model Performance', window=10):
+    """
+    Plots the performance of multiple models on the same axes using Seaborn for styling.
+
+    Reads CSV log files from specified paths and plots the mean episode scores
+    achieved during testing against the cumulative time steps for each model.
+    Each line is smoothed using a moving average to reduce noise.
+    The plot uses a logarithmic scale for the x-axis to better display the progression
+    over a wide range of steps. Each line's legend is set to the name of the last folder
+    in the path, representing the model's name. Seaborn styles are applied for enhanced visualization.
+
+    Parameters:
+    - paths (list of str): Paths to the experiment directories.
+    - ax (matplotlib.axes.Axes, optional): A matplotlib axis object to plot on. If None,
+      a new figure and axis are created.
+    - window (int, optional): Window size (in number of data points) for the moving
+      average smoothing applied to each line. Default is 10.
+    """
+    # Set the Seaborn style
+    sns.set(style="whitegrid")
+    colors = sns.color_palette("colorblind")  # Colorblind-friendly palette
+
+    if ax is None:
+        fig, ax = plt.subplots()
+
+    for index, path in enumerate(paths):
+        # Extract the model name from the path
+        model_name = os.path.basename(path.rstrip('/'))
+
+        # Load data
+        df = pd.read_csv(os.path.join(path, 'log.csv'))
+        scores = df['test/episode_score/mean']
+        lengths = df['test/episode_length/mean']
+        steps = np.cumsum(lengths)
+
+        # Apply moving average smoothing
+        # min_periods=1 ensures the start of the series isn't dropped (NaNs)
+        smoothed_scores = scores.rolling(window=window, min_periods=1, center=True).mean()
+
+        sns.lineplot(x=steps, y=smoothed_scores, ax=ax, label=model_name, color=colors[index % len(colors)])
+
+    ax.set_xscale('log')
+    ax.set_xlabel('Cumulative Time Steps')
+    ax.set_ylabel('Max Episode Score')
+    ax.legend(fontsize=8)
+    ax.set_title(title)
+
+
 def draw_network(mode='NCAP', N=2, include_speed_control=False, include_turn_control=False):
     """
     Draws a network graph for a swimmer model based on either NCAP or MLP architecture.
