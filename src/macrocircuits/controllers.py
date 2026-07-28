@@ -54,10 +54,44 @@ from macrocircuits.constraints import (
 
 
 # ==================================================================================================
-# Biologically Inspired controllers.
+# State (Observation) Fetching Functions
+
 def distance_to_food_target(observations, n_joints):
     to_target = observations[..., n_joints:n_joints + 2]
+    dist = torch.norm(to_target, dim=-1, keepdim=True).clamp(min=1e-6)
+    to_target /= dist
     return torch.norm(to_target, dim=-1)
+
+def foraging_state(observations, n_joints):
+    """Joint angles plus the head-egocentric [forward, lateral] vector to the food.
+
+    Assumes observation layout: joints, to_target, body_velocities -- i.e. a task with
+    enable_foraging (or enable_single_target) on and enable_obstacles off.
+    """
+    joints = observations[..., :n_joints]
+    to_target = observations[..., n_joints:n_joints + 2]
+    dist = torch.norm(to_target, dim=-1, keepdim=True).clamp(min=1e-6)
+    to_target /= dist
+    return torch.cat((joints, to_target), dim=-1)
+
+def obstacle_state(observations, n_joints):
+    """Joint angles plus the head-egocentric [forward, lateral] vector to the nearest
+    obstacle.
+
+    Assumes observation layout: joints, to_obstacle, body_velocities -- i.e. a task with
+    enable_obstacles on and enable_foraging off.
+    """
+    joints = observations[..., :n_joints]
+    to_obstacle = observations[..., n_joints:n_joints + 2]
+    dist = torch.norm(to_obstacle, dim=-1, keepdim=True).clamp(min=1e-6)
+    to_obstacle/= dist
+    return torch.cat((joints, to_obstacle), dim=-1)
+
+# ==================================================================================================
+
+
+# ==================================================================================================
+# Biologically Inspired controllers.
 
 class NaivePiouretteController(nn.Module):
 
@@ -114,28 +148,6 @@ def make_foraging_naive_piourette(n_joints, tau=TAU):
 
 # ==================================================================================================
 # Learned controllers.
-
-def foraging_state(observations, n_joints):
-    """Joint angles plus the head-egocentric [forward, lateral] vector to the food.
-
-    Assumes observation layout: joints, to_target, body_velocities -- i.e. a task with
-    enable_foraging (or enable_single_target) on and enable_obstacles off.
-    """
-    joints = observations[..., :n_joints]
-    to_target = observations[..., n_joints:n_joints + 2]
-    return torch.cat((joints, to_target), dim=-1)
-
-
-def obstacle_state(observations, n_joints):
-    """Joint angles plus the head-egocentric [forward, lateral] vector to the nearest
-    obstacle.
-
-    Assumes observation layout: joints, to_obstacle, body_velocities -- i.e. a task with
-    enable_obstacles on and enable_foraging off.
-    """
-    joints = observations[..., :n_joints]
-    to_obstacle = observations[..., n_joints:n_joints + 2]
-    return torch.cat((joints, to_obstacle), dim=-1)
 
 
 class MLPController(nn.Module):
