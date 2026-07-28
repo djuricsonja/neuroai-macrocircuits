@@ -55,7 +55,6 @@ from macrocircuits.constraints import (
 
 # ==================================================================================================
 # State (Observation) Fetching Functions
-
 def distance_to_food_target(observations, n_joints):
     to_target = observations[..., n_joints:n_joints + 2]
     dist = torch.norm(to_target, dim=-1, keepdim=True).clamp(min=1e-6)
@@ -92,7 +91,6 @@ def obstacle_state(observations, n_joints):
 
 # ==================================================================================================
 # Biologically Inspired controllers.
-
 class NaivePiouretteController(nn.Module):
 
     def __init__(self, n_joints, state_fn=distance_to_food_target, tau=20):
@@ -148,8 +146,6 @@ def make_foraging_naive_piourette(n_joints, tau=TAU):
 
 # ==================================================================================================
 # Learned controllers.
-
-
 class MLPController(nn.Module):
     """Learns the sensed-vector -> steering-command mapping the reflexes hand-derive.
 istance_to_food_target
@@ -187,13 +183,11 @@ def make_obstacle_avoidance_mlp(n_joints, hidden_size=16):
     return MLPController(n_joints, obstacle_state, hidden_size=hidden_size)
 
 
-
 class MLPBased_PiouretteController(NaivePiouretteController):
 
     def __init__(self, n_joints, state_fn=foraging_state, tau=20):
         super().__init__(n_joints, state_fn, tau)
-        # self.weight = nn.Parameter(torch.zeros((self.n_joints + 2, 3)))
-        self.weight = excitatory_uniform((self.n_joints + 2, 3))
+        self.weight = nn.Parameter(torch.zeros((self.n_joints + 2, 3)))
         self.tau_layer = nn.Parameter(torch.zeros(self.n_joints + 2,))
 
         self.prev_controls = torch.tensor([0., 0., 1.0])
@@ -249,77 +243,8 @@ class MLPBased_PiouretteController(NaivePiouretteController):
         left, right, speed = self.controls.split(1, dim=-1)
         return right, left, speed
 
-
-# class MLPBased_PiouretteController(NaivePiouretteController):
-
-#     def __init__(self, n_joints, state_fn=foraging_state, tau=20):
-#         super().__init__(n_joints, state_fn, tau)
-#         self.weight = nn.Parameter(torch.zeros((self.n_joints + 2, 3)))
-#         self.conc_gradient = torch.tensor(-1E12)
-#         self.prev_controls = torch.tensor([0., 0., 1.0])
-
-#         self.tau_layer = nn.Parameter(torch.zeros(self.n_joints + 2,))
-#         self.learned_tau = None
-
-#     def _get_conc_gradient(self, observations):
-#         obs = self.state_fn(observations, self.n_joints)
-#         # print(obs.size())
-#         joints = obs[:, :self.n_joints]
-#         to_target = obs[:, self.n_joints:]
-
-#         # to_target = self.state_fn(observations, self.n_joints)
-#         # concentration proxy: negative distance, so higher = closer to food
-#         x = -torch.norm(to_target, dim=-1)
-#         if x.dim() > 0:
-#             x = x[-1]
-
-#         if (self.counter == 0) or (self.counter < int(self.tau)):
-#             if self.counter == 0:
-#                 self.concentration[0] = x
-#                 self.prev_controls = self.controls.clone().detach()
-#             self.counter += 1
-#         else:
-#             self.concentration[1] = x
-#             self.conc_gradient = torch.tensor(self.concentration[1] - self.concentration[0])
-#             self.counter = 0
-
-#         return torch.cat([joints, to_target], dim=-1), self.conc_gradient
-
-#     def _get_counter(self):
-#         return torch.tensor(self.counter)
-
-#     def forward(self, observations, n_joints=None):
-#         with torch.no_grad():
-#             obs, conc_gradient = self._get_conc_gradient(observations)
-#             batch_size = obs.shape[0]
-#             counter = self._get_counter()
-
-#             # if counter == 0:
-#             #     print(f"CONCENTRATION GRADIENT: {conc_gradient}")
-
-#              # Reset any batch-shaped state that doesn't match the current call's batch size
-#             # (Trainer alternates 4096-env training rollouts with single-env test episodes).
-#             if self.controls.dim() == 1 or self.controls.shape[0] != batch_size:
-#                 self.controls = torch.tensor([0., 0., 1.0]).expand(batch_size, 3).clone()
-#             if self.prev_controls.dim() == 1 or self.prev_controls.shape[0] != batch_size:
-#                 self.prev_controls = self.controls.clone().detach()
-
-#         neg_conc_gradient = torch.relu(-1 * conc_gradient)
-#         tau_val = torch.relu(neg_conc_gradient * (obs @ self.tau_layer))
-#         tau_val = torch.clamp(tau_val, min=2, max=50)
-#         time_constant = torch.relu(torch.exp(-1 * (tau_val - 1 - counter)))
-#         self.controls = torch.sigmoid((neg_conc_gradient * time_constant * (obs @ self.weight)) + self.prev_controls)
-#         # print(obs.size(), self.controls.size(), self.prev_controls.size())
-
-#         with torch.no_grad():
-#             self.learned_tau = tau_val
-
-#         left, right, speed = self.controls.split(1, dim=-1)
-#         return right, left, speed
-
 def make_foraging_mlp_piourette(n_joints, tau=TAU):
     return MLPBased_PiouretteController(n_joints, state_fn=foraging_state, tau=tau)
-
 
 
 class MLPBased_ReflexController(nn.Module):
@@ -342,7 +267,6 @@ class MLPBased_ReflexController(nn.Module):
 
 def make_foraging_mlp_reflex(n_joints):
     return MLPBased_ReflexController(n_joints, state_fn=foraging_state)
-
 
 
 class MLP_Reflex_Piourette_Controller(nn.Module):
@@ -373,7 +297,6 @@ class MLP_Reflex_Piourette_Controller(nn.Module):
 
 def make_foraging_mlp_reflex_piourette(n_joints, tau=TAU):
     return MLP_Reflex_Piourette_Controller(n_joints, state_fn=foraging_state, tau=tau)
-
 
 
 class LearnedSteering(nn.Module):
