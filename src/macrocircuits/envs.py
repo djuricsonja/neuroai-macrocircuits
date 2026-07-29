@@ -106,6 +106,13 @@ class Physics(swimmer.Physics):
         idx = np.argmin(dists)
         return vectors[idx], dists[idx]
 
+    # def joints_to_head(self, n_joints=6):
+    #     # print(f"Body geometry names: {self._body_geom_names()}")
+    #     # for i in range(self.model.nbody):
+    #     #     print(i, self.model.body(i).name)
+    #     for i in range(n_joints - 1):
+    #         print()
+
 
 class Swim(swimmer.Swimmer):
     """Swim forwards, with independently toggleable foraging and obstacle avoidance."""
@@ -130,6 +137,7 @@ class Swim(swimmer.Swimmer):
         food_size=0.02,
         conc_at_source=100,
         decay_len=10,
+        n_joints=6,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -153,6 +161,8 @@ class Swim(swimmer.Swimmer):
         self._conc_at_source = conc_at_source
         self._decay_len = decay_len
         self._prev_target_dist = None  # for the per-step progress reward
+
+        self.n_joints = n_joints
 
     def initialize_episode(self, physics):
         # disabled = bool(physics.model.opt.disableflags & mujoco.mjtDisableBit.mjDSBL_CONTACT)
@@ -180,12 +190,22 @@ class Swim(swimmer.Swimmer):
         names = physics.named.data.xpos.axes.row.names
         return names, physics.named.data.xpos[:]
     
-    # def worm_positions(physics, n_joints, head_name):
-    #     """World (x, y, z) position of just the worm's own segments, excluding
-    #     world/target/obstacle bodies. head_name must be confirmed from
-    #     all_body_positions' printed names first (e.g. 'head')."""
-    #     names = [head_name] + [f'segment_{i}' for i in range(n_joints)]
-    #     return np.array([physics.named.data.xpos[n] for n in names])
+    def worm_positions(self, physics, n_joints, head_name):
+        """World (x, y, z) position of just the worm's own segments, excluding
+        world/target/obstacle bodies. head_name must be confirmed from
+        all_body_positions' printed names first (e.g. 'head')."""
+        names = [head_name] + [f'segment_{i}' for i in range(n_joints - 1)]
+        return names, np.array([physics.named.data.xpos[n] for n in names])
+
+    def joints_to_head_distance(self, physics):
+        head_orientation = physics.named.data.xmat['head'].reshape(3, 3)
+        head_pos = physics.named.data.xpos['head']
+        distances = []
+        for i in range(self.n_joints - 1):
+            body_pos = physics.named.data.xpos[f'segment_{i}']
+            local_vec = (head_pos - body_pos).dot(head_orientation)[:2]
+            distances = distances + list(local_vec)
+        return np.array(distances)
 
     def get_observation(self, physics):
         """joints, [to_target], [to_obstacle], body_velocities -- in that fixed order,
@@ -198,6 +218,7 @@ class Swim(swimmer.Swimmer):
             vector, _ = physics.nearest_obstacle(self._n_obstacles)
             obs['to_obstacle'] = vector
         obs['body_velocities'] = physics.body_velocities()
+        obs['joints_to_head'] = self.joints_to_head_distance(physics)
         return obs
 
     def get_reward(self, physics):
@@ -318,6 +339,7 @@ def swim(
         enable_obstacles=enable_obstacles,
         n_obstacles=n_obstacles,
         random=random,
+        n_joints=n_links
     )
     return control.Environment(
         physics, task, time_limit=time_limit,
@@ -349,6 +371,7 @@ def swim_to_ball(
         enable_obstacles=enable_obstacles,
         n_obstacles=n_obstacles,
         random=random,
+        n_joints=n_links
     )
     return control.Environment(
         physics, task, time_limit=time_limit,
@@ -405,6 +428,7 @@ def foraging(
         alignment_gated_progress_weight=alignment_gated_progress_weight,
         eat_bonus=eat_bonus,
         random=random,
+        n_joints=n_links
     )
     return control.Environment(
         physics, task, time_limit=time_limit,
@@ -438,6 +462,7 @@ def evasion(
         enable_obstacles=enable_obstacles,
         n_obstacles=n_obstacles,
         random=random,
+        n_joints=n_links
     )
     return control.Environment(
         physics, task, time_limit=time_limit,
