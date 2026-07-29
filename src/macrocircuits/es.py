@@ -118,6 +118,14 @@ class NCAPSwimmerPolicy(nn.Module):
         right, left, speed = (
             self.controller(observations) if self.controller else (None, None, None)
         )
+        # In-circuit steering reads the egocentric target vector itself, with no
+        # controller involved; it sits immediately after the joints in the observation
+        # (see Swim.get_observation). Same slice SwimmerActor uses on the RL path --
+        # guarded on the flag so the index is never misread on a task with no target.
+        if getattr(self.swimmer, 'include_target_steering', False):
+            target_vec = observations[..., self.n_joints:self.n_joints + 2]
+        else:
+            target_vec = None
         # timesteps=None -> use the module's internal counter for the oscillator;
         # log_activity=False -> don't accumulate connection records across the run.
         return self.swimmer(
@@ -126,6 +134,7 @@ class NCAPSwimmerPolicy(nn.Module):
             right_control=right,
             left_control=left,
             speed_control=speed,
+            target_vec=target_vec,
             log_activity=False,
         )
 
@@ -364,6 +373,7 @@ def es_config(
     task='swim',
     task_kwargs=None,
     controller=None,
+    controller_kwargs=None,
     generations=100,
     population_size=64,
     sigma=0.02,
@@ -393,6 +403,7 @@ def es_config(
         task=task,
         task_kwargs=task_kwargs,
         controller=controller,
+        controller_kwargs=controller_kwargs,
         n_steps=generations,
         population_size=population_size,
         sigma=sigma,
@@ -413,6 +424,7 @@ def is_es_trained(
     task='swim',
     task_kwargs=None,
     controller=None,
+    controller_kwargs=None,
     population_size=64,
     sigma=0.02,
     lr=0.02,
@@ -448,6 +460,9 @@ def is_es_trained(
         # still matches a plain run and is not needlessly retrained.
         and saved.get('task_kwargs', {}) == task_env_kwargs(task, n_links, task_kwargs)
         and saved.get('controller') == controller
+        # Defaulted to {} so a run saved before controller_kwargs existed still
+        # matches an optionless run and is not needlessly retrained.
+        and saved.get('controller_kwargs', {}) == dict(controller_kwargs or {})
         and saved.get('population_size') == population_size
         and saved.get('sigma') == sigma
         and saved.get('lr') == lr
@@ -460,17 +475,22 @@ def is_es_trained(
     )
 
 
-def make_es_policy(network, agent, hidden_sizes=(64, 64), swimmer_kwargs=None, controller=None):
+def make_es_policy(
+    network, agent, hidden_sizes=(64, 64), swimmer_kwargs=None, controller=None,
+    controller_kwargs=None,
+):
     """Build the ES policy for `network` ('ncap' or 'mlp'), sized from `agent`.
 
-    `controller` names a steering controller to plug into NCAP's turn inputs; the MLP
-    baseline has none, and `check_controller` (called by run_es) rejects that pairing
-    before it gets here.
+    `controller` names a steering controller to plug into NCAP's turn inputs, and
+    `controller_kwargs` its factory options; the MLP baseline has none, and
+    `check_controller` (called by run_es) rejects that pairing before it gets here.
     """
     if network == 'ncap':
         return NCAPSwimmerPolicy(
             n_joints=agent.action_size,
-            controller=make_controller(controller, agent.action_size),
+            controller=make_controller(
+                controller, agent.action_size, **(controller_kwargs or {}),
+            ),
             **(swimmer_kwargs or {}),
         )
     if network == 'mlp':
@@ -522,6 +542,7 @@ def run_es(
     n_links=6,
     task='swim',
     controller=None,
+    controller_kwargs=None,
     population_size=64,
     sigma=0.02,
     lr=0.02,
@@ -567,6 +588,7 @@ def run_es(
         hidden_sizes=hidden_sizes,
         swimmer_kwargs=swimmer_kwargs,
         controller=controller,
+        controller_kwargs=controller_kwargs,
     )
     es = EvolutionStrategy(
         policy,
@@ -597,6 +619,7 @@ def run_es(
             # Saved so play_es_model() can rebuild the exact policy and environment.
             'task_kwargs': env_kwargs,
             'controller': controller,
+            'controller_kwargs': dict(controller_kwargs or {}),
             'swimmer_kwargs': dict(swimmer_kwargs or {}),
         }
         _save_es_run(
@@ -637,6 +660,7 @@ def play_es_model(path, camera_id=0, width=640, height=480, fps=60):
         hidden_sizes=tuple(config.get('hidden_sizes') or (64, 64)),
         swimmer_kwargs=config.get('swimmer_kwargs'),
         controller=config.get('controller'),
+        controller_kwargs=config.get('controller_kwargs'),
     )
     checkpoint = os.path.join(path, 'checkpoints', 'best.pt')
     policy.load_state_dict(torch.load(checkpoint, map_location='cpu'))

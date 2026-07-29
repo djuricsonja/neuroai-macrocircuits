@@ -9,20 +9,28 @@ vector unused unless something turns it into the circuit's `right_control` /
 | `controller=` | what steers | learned? |
 |---|---|---|
 | `None` | nothing -- the circuit swims straight, only its reward changes | -- |
-| `'foraging'` / `'obstacle_avoidance'` | a fixed reflex (`reflex_steering`) | no |
-| `'mlp_foraging'` / `'mlp_obstacle_avoidance'` | a small MLP (`MLPController`) | yes |
+| `'foraging'` / `'obstacle_avoidance'` | a fixed P+D reflex (`reflex_steering`) | no |
+| `'steer_to_food'` | a fixed proportional turn toward food | no |
+| `'turn_left'` / `'turn_right'` | a constant turn, sensor-free (an actuator test) | no |
+| `'learned_steering'` | a tiny MLP on the bearing, driving the fixed turn primitive | yes |
+| `'mlp_foraging'` / `'mlp_obstacle_avoidance'` | a small MLP on joints + vector (`MLPController`) | yes |
 
 That is the comparison the tasks exist for: how much of the steering has to be learned
-once the swimming itself is given by the architecture.
+once the swimming itself is given by the architecture -- with `None` as the floor it is
+all measured against.
 
-All three are the same shape to the rest of the code -- a callable
+All of these are the same shape to the rest of the code -- a callable
 `controller(observations) -> (right, left, speed)`, each `(..., 1)` in `[0, 1]`, or
-`None`. The reflexes are plain closures; `MLPController` is an `nn.Module`, so
-assigning it to `SwimmerActor.controller` (RL) or `NCAPSwimmerPolicy.controller` (ES)
-registers it as a submodule and its parameters are trained/evolved along with the
-circuit's own. Nothing else has to know which kind it got.
+`None`. The reflexes are plain closures; `LearnedSteering` and `MLPController` are
+`nn.Module`s, so assigning either to `SwimmerActor.controller` (RL) or
+`NCAPSwimmerPolicy.controller` (ES) registers it as a submodule and its parameters are
+trained/evolved along with the circuit's own. Nothing else has to know which kind it got.
 """
 
+
+TAU = 5
+
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -30,11 +38,28 @@ from macrocircuits.envs import TASKS
 from macrocircuits.reflex_steering import (
     make_foraging_reflex,
     make_obstacle_avoidance_reflex,
+    make_steer_to_food_reflex,
+    make_turn_left_reflex,
+    make_turn_right_reflex,
+)
+
+from macrocircuits.constraints import (
+    excitatory_uniform, 
+    inhibitory_uniform, 
+    unsigned_uniform,
+    excitatory,
+    inhibitory,
+    unsigned
 )
 
 
 # ==================================================================================================
-# Learned controllers.
+# State (Observation) Fetching Functions
+def distance_to_food_target(observations, n_joints):
+    to_target = observations[..., n_joints:n_joints + 2]
+    dist = torch.norm(to_target, dim=-1, keepdim=True).clamp(min=1e-6)
+    to_target /= dist
+    return torch.norm(to_target, dim=-1)
 
 def foraging_state(observations, n_joints):
     """Joint angles plus the head-egocentric [forward, lateral] vector to the food.
@@ -44,8 +69,9 @@ def foraging_state(observations, n_joints):
     """
     joints = observations[..., :n_joints]
     to_target = observations[..., n_joints:n_joints + 2]
+    dist = torch.norm(to_target, dim=-1, keepdim=True).clamp(min=1e-6)
+    to_target /= dist
     return torch.cat((joints, to_target), dim=-1)
-
 
 def obstacle_state(observations, n_joints):
     """Joint angles plus the head-egocentric [forward, lateral] vector to the nearest
@@ -56,12 +82,73 @@ def obstacle_state(observations, n_joints):
     """
     joints = observations[..., :n_joints]
     to_obstacle = observations[..., n_joints:n_joints + 2]
+    dist = torch.norm(to_obstacle, dim=-1, keepdim=True).clamp(min=1e-6)
+    to_obstacle/= dist
     return torch.cat((joints, to_obstacle), dim=-1)
 
+# ==================================================================================================
 
+
+# ==================================================================================================
+# Biologically Inspired controllers.
+class NaivePiouretteController(nn.Module):
+
+    def __init__(self, n_joints, state_fn=distance_to_food_target, tau=20):
+        super().__init__()
+        self.tau = tau
+        self.counter = 0
+        self.n_joints = n_joints
+        self.state_fn = state_fn
+        self.concentration = torch.zeros((2,))
+        self.controls = torch.tensor([0.0, 0.0, 1.0])
+        self.dist = torch.distributions.Uniform(0.0, 1.0)
+
+    def forward(self, observations, n_joints=None):
+        to_target = self.state_fn(observations, self.n_joints)
+        # concentration proxy: negative distance, so higher = closer to food
+        x = -torch.norm(to_target, dim=-1)
+        if x.dim() > 0:
+            x = x[-1]
+
+        with torch.no_grad():
+            if (self.counter == 0) or (self.counter < (self.tau - 1)):
+                if self.counter == 0:
+                    self.concentration[0] = x
+                self.counter += 1
+            else:
+                self.concentration[1] = x
+                conc_gradient = self.concentration[1] - self.concentration[0]
+
+                if conc_gradient < 0:
+                    # concentration decreasing (getting farther) -> pirouette:
+                    # pick a single turn direction and magnitude, keep speed fixed
+                    magnitude = self.dist.sample((1,))
+                    go_right = torch.rand(1) < 0.5
+                    left = torch.where(go_right, torch.zeros(1), magnitude)
+                    right = torch.where(go_right, magnitude, torch.zeros(1))
+                    speed = torch.ones(1)
+                    self.controls = torch.cat([left, right, speed])
+                # else: concentration flat/increasing -> keep current heading (run)
+
+                self.counter = 0
+
+            left, right, speed = self.controls
+            return right, left, speed
+        
+def make_foraging_naive_piourette(n_joints, tau=TAU):
+    return NaivePiouretteController(n_joints, state_fn=distance_to_food_target, tau=tau)
+
+# ==================================================================================================
+
+
+
+
+
+# ==================================================================================================
+# Learned controllers.
 class MLPController(nn.Module):
     """Learns the sensed-vector -> steering-command mapping the reflexes hand-derive.
-
+istance_to_food_target
     `state_fn` slices the inputs out of the raw observation (which is why the controller
     needs `n_joints`), and the head outputs `right`, `left`, `speed`, squashed to [0, 1]
     to match the range the circuit's turn inputs expect.
@@ -86,16 +173,218 @@ class MLPController(nn.Module):
         right, left, speed = out.split(1, dim=-1)  # each keeps shape (..., 1)
         return right, left, speed
 
-
 def make_foraging_mlp(n_joints, hidden_size=16):
     """Learned counterpart of `make_foraging_reflex`: steer from the vector to the food."""
     return MLPController(n_joints, foraging_state, hidden_size=hidden_size)
-
 
 def make_obstacle_avoidance_mlp(n_joints, hidden_size=16):
     """Learned counterpart of `make_obstacle_avoidance_reflex`: steer from the vector to
     the nearest obstacle."""
     return MLPController(n_joints, obstacle_state, hidden_size=hidden_size)
+
+
+class MLPBased_PiouretteController(NaivePiouretteController):
+
+    def __init__(self, n_joints, state_fn=foraging_state, tau=20):
+        super().__init__(n_joints, state_fn, tau)
+        self.weight = nn.Parameter(torch.zeros((self.n_joints + 2, 3)))
+        self.tau_layer = nn.Parameter(torch.zeros(self.n_joints + 2,))
+
+        self.prev_controls = torch.tensor([0., 0., 1.0])
+        # Per-env state, lazily (re)sized on first call / batch-size change.
+        self.counter_t = None
+        self.tau_t = tau
+        self.prev_x = None
+        self.conc_gradient = None
+
+    def _ensure_batch_state(self, batch_size, device):
+        if self.counter_t is None or self.counter_t.shape[0] != batch_size:
+            self.counter_t = torch.zeros(batch_size, 1, device=device)
+            self.prev_x = torch.zeros(batch_size, 1, device=device)
+            self.conc_gradient = torch.zeros(batch_size, 1, device=device)
+            self.controls = torch.tensor([0., 0., 1.0], device=device).expand(batch_size, 3).clone()
+            self.prev_controls = self.controls.clone()
+            self.tau_t = torch.zeros(batch_size, 1, device=device)
+
+    def forward(self, observations, n_joints=None):
+        with torch.no_grad():
+            obs = self.state_fn(observations, self.n_joints)
+            to_target = obs[:, self.n_joints:]
+            x = -torch.norm(to_target, dim=-1, keepdim=True)  # (batch, 1) per-env concentration
+
+            batch_size = obs.shape[0]
+            self._ensure_batch_state(batch_size, obs.device)
+
+            # Learned, per-env hold duration.
+            # neg_conc_gradient = torch.relu(-1 * self.conc_gradient)
+
+            # Per-env: has this env's hold timer expired?
+            due = self.counter_t >= self.tau_t
+
+            # Where due: recompute gradient from new baseline and reset; else: keep holding.
+            self.conc_gradient = torch.where(due, x - self.prev_x, self.conc_gradient)
+            self.prev_x = torch.where(due, x, self.prev_x)
+            self.prev_controls = torch.where(due, self.controls, self.prev_controls)
+            self.counter_t = torch.where(due, torch.zeros_like(self.counter_t), self.counter_t + 1)
+
+        neg_conc_gradient = torch.relu(-1 * self.conc_gradient)
+        tau_t = torch.clamp(
+                        torch.relu(neg_conc_gradient * (obs @ self.tau_layer).unsqueeze(-1)),
+                        min=2, max=50,
+                    )
+        time_constant = torch.relu(torch.exp(-1 * (tau_t - 1 - self.counter_t)))
+        self.controls = torch.sigmoid(
+            (neg_conc_gradient * time_constant * (obs @ self.weight)) + self.prev_controls
+        )
+
+        with torch.no_grad():
+            self.tau_t = tau_t.detach()
+
+        left, right, speed = self.controls.split(1, dim=-1)
+        return right, left, speed
+
+def make_foraging_mlp_piourette(n_joints, tau=TAU):
+    return MLPBased_PiouretteController(n_joints, state_fn=foraging_state, tau=tau)
+
+
+class MLPBased_ReflexController(nn.Module):
+
+    def __init__(self, n_joints, state_fn=foraging_state):
+        super().__init__()
+        self.n_joints = n_joints
+        self.state_fn = state_fn
+        self.weight = nn.Parameter(torch.zeros((self.n_joints + 2, 3)))
+
+    def forward(self, observations, n_joints=None):
+        with torch.no_grad():
+            x = self.state_fn(observations, self.n_joints)
+            # to_target = self.state_fn(observations, self.n_joints)
+            # x = to_target[-1]
+
+        y = torch.sigmoid(x @ self.weight)
+        left, right, speed = y.split(1, dim=-1)
+        return right, left, speed
+
+def make_foraging_mlp_reflex(n_joints):
+    return MLPBased_ReflexController(n_joints, state_fn=foraging_state)
+
+
+class MLP_Reflex_Piourette_Controller(nn.Module):
+
+    def __init__(self, n_joints, state_fn=foraging_state, tau=20):
+        super().__init__()
+
+        self.reflex_controller = MLPBased_ReflexController(n_joints, state_fn)
+        self.piourette_controller = MLPBased_PiouretteController(n_joints, state_fn, tau)
+
+        self.n_joints = n_joints
+        self.state_fn =state_fn
+        self.mixer_layer = nn.Linear(6, 3)
+        self.gate = nn.Linear(n_joints+2, 6)
+
+    def forward(self, observations, n_joints=None):
+        r1, l1, s1 = self.reflex_controller(observations)
+        r2, l2, s2 = self.piourette_controller(observations)
+
+        obs = self.state_fn(observations, self.n_joints)
+        g = torch.sigmoid(self.gate(obs))
+
+        x = torch.cat([r1, r2, l1, l2, s1, s2], dim=-1)
+        x = g * x
+        right, left, speed = torch.sigmoid(self.mixer_layer(x)).split(1, dim=-1)
+
+        return right, left, speed
+
+def make_foraging_mlp_reflex_piourette(n_joints, tau=TAU):
+    return MLP_Reflex_Piourette_Controller(n_joints, state_fn=foraging_state, tau=tau)
+
+
+class LearnedSteering(nn.Module):
+    """Learn *how* to steer toward food on top of the fixed turn primitive.
+
+    Pipeline: the egocentric direction to the food -> a tiny MLP -> one turn command,
+    handed to NCAP's left/right inputs at a fixed, pre-calibrated strength. Far smaller
+    and better-posed than the from-scratch `MLPController`, which reads raw joints + raw
+    vector and would have to discover the geometry, the sign convention, the turn
+    strength and the decision all at once.
+
+    Egocentric convention, MEASURED directly (see the check_convention diagnostic), not
+    inherited from the older steering code which had these axes SWAPPED (the bug that
+    kept the whole foraging effort from ever steering):
+        lateral = to_target[0]   (+ve => food is to the worm's LEFT)
+        forward = -to_target[1]  (+ve => food is AHEAD)
+    Driving `left` turns the worm to its own left.
+
+    Bounded with `tanh`, never a hard [0, 1] clamp: a clamp saturates ~95% of steps and
+    starves the parameters of gradient (a failure this project already hit); tanh keeps a
+    live gradient every step, and turn_strength <= the calibrated ceiling means no upper
+    clamp is ever needed.
+
+    Warm start: from random init, PPO here never even discovered the correct turn *sign*
+    -- it collapsed to a constant weak turn (~7% success) while the same steering rule
+    hand-set navigates at ~90%. So the net is first behaviour-cloned to reproduce that
+    correct-sign hardcoded steerer, and PPO then only has to *refine* it. This is the
+    "good init + learning" philosophy the NCAP paper itself uses for the circuit weights,
+    not a reused hand-tuned magic number.
+    """
+
+    def __init__(self, n_joints, hidden_size=8, turn_strength=0.75,
+                 warm_start=True, warm_gain=3.0, warm_steps=500):
+        super().__init__()
+        self.n_joints = n_joints
+        self.target_slice = slice(n_joints, n_joints + 2)
+        self.turn_strength = turn_strength
+        self.net = nn.Sequential(
+            nn.Linear(2, hidden_size),   # unit [forward, lateral] -> hidden
+            nn.Tanh(),
+            nn.Linear(hidden_size, 1),   # -> one turn command (pre-activation)
+        )
+        if warm_start:
+            self._behaviour_clone(warm_gain, warm_steps)
+
+    def _behaviour_clone(self, gain, steps, seed=0):
+        """Fit the net to the correct-sign hardcoded steerer over random bearings, so RL
+        starts from a working ~90% policy rather than from noise (and, critically, with
+        the turn sign already right)."""
+        gen = torch.Generator().manual_seed(seed)
+        opt = torch.optim.Adam(self.net.parameters(), lr=0.02)
+        for _ in range(steps):
+            phi = (torch.rand(256, 1, generator=gen) * 2 - 1) * np.pi   # bearing, 0 = ahead
+            feat = torch.cat((torch.cos(phi), torch.sin(phi)), dim=-1)  # [fwd_hat, lat_hat]
+            target = torch.tanh(gain * phi)                             # correct-sign turn
+            loss = ((torch.tanh(self.net(feat)) - target) ** 2).mean()
+            opt.zero_grad(); loss.backward(); opt.step()
+
+    def forward(self, observations):
+        to_target = observations[..., self.target_slice]
+        lateral = to_target[..., 0, None]
+        forward = -to_target[..., 1, None]
+        dist = torch.norm(to_target, dim=-1, keepdim=True).clamp(min=1e-6)
+        features = torch.cat((forward / dist, lateral / dist), dim=-1)  # unit bearing
+
+        u = torch.tanh(self.net(features)) * self.turn_strength  # in (-strength, strength)
+        left = u.clamp(min=0)      # u > 0  => food to the left  => turn left
+        right = (-u).clamp(min=0)  # u < 0  => food to the right => turn right
+        speed = torch.ones_like(u)
+        return right, left, speed
+
+
+def make_learned_steering(n_joints, hidden_size=8, turn_strength=0.75, warm_start=True):
+    """Option 5 controller -- learns the steering decision on top of the fixed turn
+    primitive, warm-started at the correct-sign hand solution. See `LearnedSteering`."""
+    return LearnedSteering(n_joints, hidden_size=hidden_size, turn_strength=turn_strength,
+                           warm_start=warm_start)
+
+def make_learned_steering_disable_warm_start(n_joints, hidden_size=8, turn_strength=0.75, warm_start=False):
+    """Option 5 controller -- learns the steering decision on top of the fixed turn
+    primitive, without warm-starting at the correct-sign hand solution. See `LearnedSteering`."""
+    return LearnedSteering(n_joints, hidden_size=hidden_size, turn_strength=turn_strength,
+                           warm_start=warm_start)
+
+# ==================================================================================================
+
+
+
 
 
 # ==================================================================================================
@@ -112,6 +401,20 @@ CONTROLLERS = {
     'obstacle_avoidance': ('make_obstacle_avoidance_reflex', ('evasion',)),
     'mlp_foraging': ('make_foraging_mlp', ('foraging', 'swim_to_ball')),
     'mlp_obstacle_avoidance': ('make_obstacle_avoidance_mlp', ('evasion',)),
+    'naive_piourette_foraging': ('make_foraging_naive_piourette', ('foraging', 'swim_to_ball')),
+    'mlp_piourette_foraging': ('make_foraging_mlp_piourette', ('foraging', 'swim_to_ball')),
+    'mlp_reflex_foraging': ('make_foraging_mlp_reflex', ('foraging', 'swim_to_ball')),
+    'mlp_reflex_piourette_foraging': ('make_foraging_mlp_reflex_piourette', ('foraging', 'swim_to_ball')),
+
+    # Hardcoded turn tests: sensor-free, so valid on every task (they read no
+    # to_target/to_obstacle vector, they just hold the turn signal to one side).
+    'turn_left': ('make_turn_left_reflex', tuple(TASKS)),
+    'turn_right': ('make_turn_right_reflex', tuple(TASKS)),
+    # Hardcoded correct-convention navigator (~90% on foraging, no learning).
+    'steer_to_food': ('make_steer_to_food_reflex', ('foraging', 'swim_to_ball')),
+    # Learns only the steering decision on top of the fixed turn primitive (Option 5).
+    'learned_steering': ('make_learned_steering', ('foraging', 'swim_to_ball')),
+    'learned_steering_no_warm_start': ('make_learned_steering_disable_warm_start', ('foraging', 'swim_to_ball')),
 }
 
 
@@ -142,12 +445,20 @@ def check_controller(controller, network, task):
         )
 
 
-def make_controller(controller, n_joints):
-    """Build the named controller for an `n_joints` body; None passes through as None."""
+def make_controller(controller, n_joints, **controller_kwargs):
+    """Build the named controller for an `n_joints` body; None passes through as None.
+
+    Extra keyword arguments go straight to the factory, e.g.
+    make_controller('learned_steering', 5, turn_strength=0.5).
+    """
     if controller is None:
+        if controller_kwargs:
+            raise ValueError(
+                f'controller=None takes no options, got {sorted(controller_kwargs)}'
+            )
         return None
     if controller not in CONTROLLERS:
         raise ValueError(
             f'controller must be None or one of {sorted(CONTROLLERS)}, got {controller!r}'
         )
-    return globals()[CONTROLLERS[controller][0]](n_joints)
+    return globals()[CONTROLLERS[controller][0]](n_joints, **controller_kwargs)

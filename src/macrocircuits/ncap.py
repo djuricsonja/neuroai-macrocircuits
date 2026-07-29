@@ -18,6 +18,15 @@ from macrocircuits.constraints import (
 )
 
 
+# The learned target-steering projection, named <channel><target>:
+#   channel -- r/l  lateral: target to the right / left of the head,
+#              a/b  longitudinal: target ahead of / behind the head.
+#   target  -- d/v  the dorsal / ventral head B-neuron it drives.
+# Every one is sign-free and learned, so the circuit discovers which channel should
+# excite which side; the wiring only supplies the four sensory channels.
+_STEER_WEIGHTS = ('rd', 'rv', 'ld', 'lv', 'ad', 'av', 'bd', 'bv')
+
+
 class SwimmerModule(nn.Module):
     """C.-elegans-inspired neural circuit architectural prior."""
 
@@ -33,6 +42,7 @@ class SwimmerModule(nn.Module):
             include_head_oscillators: bool = True,
             include_speed_control: bool = False,
             include_turn_control: bool = False,
+            include_target_steering: bool = False,
     ):
         super().__init__()
         self.n_joints = n_joints
@@ -42,6 +52,7 @@ class SwimmerModule(nn.Module):
         self.include_head_oscillators = include_head_oscillators
         self.include_speed_control = include_speed_control
         self.include_turn_control = include_turn_control
+        self.include_target_steering = include_target_steering
 
         # Log activity
         self.connections_log = []
@@ -70,6 +81,20 @@ class SwimmerModule(nn.Module):
             else:
                 exc_param = inh_param = unsigned_uniform
 
+        # Steering (version B) always uses sign-free weights so the turn *direction* is
+        # discovered rather than wired: fixed magnitude, random sign.
+        #
+        # The magnitude is 0.5 from measurement, not taste. A near-zero init (+/-0.1)
+        # did not train at all: it moved episode return by only ~0.5 while the reward's
+        # own epoch-to-epoch noise spans several units, so PPO's advantages were pure
+        # variance, updates cancelled, and after 150k steps the weights had not left
+        # their init band -- a self-trapping init. Sweeping the scale over random-sign
+        # draws, the spread of return *between* inits (the signal PPO climbs) goes
+        # 0.75 (at 0.1) -> 0.92 (0.3) -> 2.09 (0.5) -> 1.47 (0.8, over-driven and worse
+        # on average). 0.5 maximises both that spread and mean return.
+        self.uns = unsigned
+        steer_param = lambda: unsigned_constant(lower=-0.5, upper=0.5)
+
         # Learnable parameters.
         self.params = nn.ParameterDict()
         if use_weight_sharing:
@@ -81,6 +106,14 @@ class SwimmerModule(nn.Module):
                 self.params['bneuron_turn'] = exc_param()
             if self.include_head_oscillators:
                 self.params['bneuron_osc'] = exc_param()
+            # Learned target-directed steering: eight sign-free sensorimotor weights,
+            # shared across the head modules that steer. Four carry the lateral
+            # channels (right/left -> dorsal/ventral head B-neuron), four the
+            # longitudinal ones (ahead/behind -> dorsal/ventral) so a target directly
+            # behind -- where lateral ~ 0 -- can still drive a turn.
+            if self.include_target_steering:
+                for _name in _STEER_WEIGHTS:
+                    self.params[f'bneuron_steer_{_name}'] = steer_param()
             self.params['muscle_ipsi'] = exc_param()
             self.params['muscle_contra'] = inh_param()
         else:
@@ -101,6 +134,11 @@ class SwimmerModule(nn.Module):
                     self.params[f'bneuron_d_osc_{i}'] = exc_param()
                     self.params[f'bneuron_v_osc_{i}'] = exc_param()
 
+                # Per-head-module steering weights (see the shared branch).
+                if self.include_target_steering and i < self.n_turn_joints:
+                    for _name in _STEER_WEIGHTS:
+                        self.params[f'bneuron_steer_{_name}_{i}'] = steer_param()
+
                 self.params[f'muscle_d_d_{i}'] = exc_param()
                 self.params[f'muscle_d_v_{i}'] = inh_param()
                 self.params[f'muscle_v_v_{i}'] = exc_param()
@@ -119,6 +157,7 @@ class SwimmerModule(nn.Module):
             right_control=None,
             left_control=None,
             speed_control=None,
+            target_vec=None,
             timesteps=None,
             log_activity=True,
             log_file='log.txt'
@@ -127,6 +166,8 @@ class SwimmerModule(nn.Module):
 
     Args:
       joint_pos (torch.Tensor): Joint positions in [-1, 1], shape (..., n_joints).
+      target_vec (torch.Tensor): Head-egocentric [lateral, longitudinal] vector to
+        the target, shape (..., 2). Only used when include_target_steering is set.
       right_control (torch.Tensor): Right turn control in [0, 1], shape (..., 1).
       left_control (torch.Tensor): Left turn control in [0, 1], shape (..., 1).
       speed_control (torch.Tensor): Speed control in [0, 1], 0 stopped, 1 fastest, shape (..., 1).
@@ -154,6 +195,29 @@ class SwimmerModule(nn.Module):
         if self.include_speed_control:
             assert speed_control is not None
             speed_control = 1 - speed_control.clamp(min=0, max=1)
+
+        # Split the egocentric vector to the target into four rectified channels (as
+        # proprioception is split dorsal/ventral), so the learned sign-free steering
+        # weights below can act on either turn direction. Steering is purely
+        # directional -- no distance term -- so it fades to zero as the worm aligns,
+        # giving a self-correcting tropism.
+        #
+        # Axis convention, measured from the model rather than assumed: the nose sits at
+        # head-local [0, -0.06, 0], so the body's long axis is y (forward is -y, matching
+        # the swim reward's -head_vel[1]) and x is lateral. Hence component 0 is
+        # left/right and component 1 is forward/backward. The *sign* of each is not
+        # assumed -- the weights are learned.
+        if self.include_target_steering:
+            assert target_vec is not None, 'include_target_steering needs target_vec'
+            lateral = target_vec[..., 0, None]
+            longitudinal = target_vec[..., 1, None]
+            steer_r = lateral.clamp(min=0, max=1)
+            steer_l = (-lateral).clamp(min=0, max=1)
+            # Longitudinal channels break the dead zone where the target is directly
+            # behind: lateral ~ 0 there, so without these the circuit would have no
+            # drive to turn around.
+            steer_a = (-longitudinal).clamp(min=0, max=1)  # forward is -y
+            steer_b = longitudinal.clamp(min=0, max=1)
 
         joint_torques = []  # [shape (..., 1)]
         for i in range(self.n_joints):
@@ -193,6 +257,29 @@ class SwimmerModule(nn.Module):
                 )
                 log('exc', f'bneuron_d_turn_{i}')
                 log('exc', f'bneuron_v_turn_{i}')
+
+            # Learned target-directed steering (version B): a sign-free sensorimotor
+            # projection from the split target offset into the head B-neurons. The eight
+            # weights are learned, so the turn direction is discovered, not wired; it is
+            # still a fixed, sparse NCAP motif (no hidden layer, no dense connectivity),
+            # unlike an MLP controller.
+            if self.include_target_steering and i < self.n_turn_joints:
+                uns = self.uns
+
+                def steer_w(name, i=i):
+                    return uns(self.params[ws(f'bneuron_steer_{name}_{i}',
+                                              f'bneuron_steer_{name}')])
+
+                bneuron_d = (
+                    bneuron_d + steer_r * steer_w('rd') + steer_l * steer_w('ld') +
+                    steer_a * steer_w('ad') + steer_b * steer_w('bd')
+                )
+                bneuron_v = (
+                    bneuron_v + steer_r * steer_w('rv') + steer_l * steer_w('lv') +
+                    steer_a * steer_w('av') + steer_b * steer_w('bv')
+                )
+                log('steer', f'bneuron_d_steer_{i}')
+                log('steer', f'bneuron_v_steer_{i}')
 
             # Oscillator units modulate first B-neurons.
             if self.include_head_oscillators and i == 0:
@@ -278,6 +365,14 @@ class SwimmerActor(nn.Module):
             low_in, high_in, low_out, high_out = self.timestep_transform
             timesteps = (timesteps - low_in) / (high_in - low_in) * (high_out - low_out) + low_out
 
+        # The egocentric vector to the target sits immediately after the joints in the
+        # observation (see Swim.get_observation), so it is sliced by position. Guarded on
+        # the flag so the index is never silently misread on a task that has no target.
+        if getattr(self.swimmer, 'include_target_steering', False):
+            target_vec = observations[..., self.action_size:self.action_size + 2]
+        else:
+            target_vec = None
+
         # Generate high-level control signals.
         if self.controller:
             right, left, speed = self.controller(observations)
@@ -291,6 +386,7 @@ class SwimmerActor(nn.Module):
             right_control=right,
             left_control=left,
             speed_control=speed,
+            target_vec=target_vec,
         )
 
         # Pass through distribution for stochastic policy.
