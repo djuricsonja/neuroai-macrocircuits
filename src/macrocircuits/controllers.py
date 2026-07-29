@@ -187,7 +187,8 @@ class MLPBased_PiouretteController(NaivePiouretteController):
 
     def __init__(self, n_joints, state_fn=foraging_state, tau=20):
         super().__init__(n_joints, state_fn, tau)
-        self.weight = nn.Parameter(torch.zeros((self.n_joints + 2, 3)))
+        # self.weight = nn.Parameter(torch.zeros((self.n_joints + 2, 3)))
+        self.weight = nn.Parameter(torch.zeros((self.n_joints + 2, 1)))
         self.tau_layer = nn.Parameter(torch.zeros(self.n_joints + 2,))
 
         self.prev_controls = torch.tensor([0., 0., 1.0])
@@ -233,9 +234,14 @@ class MLPBased_PiouretteController(NaivePiouretteController):
                         min=2, max=50,
                     )
         time_constant = torch.relu(torch.exp(-1 * (tau_t - 1 - self.counter_t)))
-        self.controls = torch.sigmoid(
-            (neg_conc_gradient * time_constant * (obs @ self.weight)) + self.prev_controls
-        )
+        # self.controls = torch.sigmoid(
+        #     (neg_conc_gradient * time_constant * (obs @ self.weight)) + self.prev_controls
+        # )
+        controls = neg_conc_gradient * time_constant * (obs @ self.weight)
+        _left = controls.clamp(min=0)      # u > 0  => food to the left  => turn left
+        _right = (-controls).clamp(min=0)  # u < 0  => food to the right => turn right
+        _speed = torch.ones_like(controls)
+        self.controls = torch.cat([_left, _right, _speed], dim=-1) + self.prev_controls
 
         with torch.no_grad():
             self.tau_t = tau_t.detach()
