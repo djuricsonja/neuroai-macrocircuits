@@ -237,7 +237,7 @@ class MLPBased_PiouretteController(NaivePiouretteController):
         # self.controls = torch.sigmoid(
         #     (neg_conc_gradient * time_constant * (obs @ self.weight)) + self.prev_controls
         # )
-        controls = torch.tanh(neg_conc_gradient * time_constant * (obs @ self.weight))
+        controls = neg_conc_gradient * time_constant * (obs @ self.weight)
         _left = controls.clamp(min=0)      # u > 0  => food to the left  => turn left
         _right = (-controls).clamp(min=0)  # u < 0  => food to the right => turn right
         _speed = torch.ones_like(controls)
