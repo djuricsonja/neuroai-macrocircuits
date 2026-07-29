@@ -168,7 +168,7 @@ istance_to_food_target
         self.n_joints = n_joints
         self.state_fn = state_fn
         self.net = nn.Sequential(
-            nn.Linear(n_joints + 2, hidden_size),  # joints + [forward, lateral]
+            nn.Linear(((self.n_joints - 1) * 2) + 2, hidden_size),
             nn.Tanh(),
             nn.Linear(hidden_size, 3),  # right, left, speed (pre-activation)
         )
@@ -264,7 +264,7 @@ class MLPBased_ReflexController(nn.Module):
         super().__init__()
         self.n_joints = n_joints
         self.state_fn = state_fn
-        self.weight = nn.Parameter(torch.zeros((self.n_joints + 2, 3)))
+        self.weight = nn.Parameter(torch.zeros((((self.n_joints - 1) * 2) + 2, 3)))
 
     def forward(self, observations, n_joints=None):
         with torch.no_grad():
