@@ -60,7 +60,7 @@ def plot_performance(paths, ax=None, title='Model Performance'):
     ax.set_title(title)
 
 
-def plot_performance_ma(paths, ax=None, title='Model Performance', window=10):
+def plot_performance_ma(paths, ax=None, title='Model Performance', window=10, legend_fontsize=5):
     """
     Plots the performance of multiple models on the same axes using Seaborn for styling.
 
@@ -104,7 +104,7 @@ def plot_performance_ma(paths, ax=None, title='Model Performance', window=10):
     ax.set_xscale('log')
     ax.set_xlabel('Cumulative Time Steps')
     ax.set_ylabel('Max Episode Score')
-    ax.legend(fontsize=8)
+    ax.legend(fontsize=legend_fontsize)
     ax.set_title(title)
 
 
