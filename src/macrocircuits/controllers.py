@@ -67,6 +67,8 @@ def foraging_state(observations, n_joints):
     Assumes observation layout: joints, to_target, body_velocities -- i.e. a task with
     enable_foraging (or enable_single_target) on and enable_obstacles off.
     """
+    joints = observations[..., :n_joints]
+
     sidx = n_joints + 2 + (n_joints*3)
     eidx = sidx + (n_joints - 1)*2
     joints_to_head = observations[..., sidx:eidx]
@@ -76,7 +78,7 @@ def foraging_state(observations, n_joints):
     to_target = observations[..., n_joints:n_joints + 2]
     dist = torch.norm(to_target, dim=-1, keepdim=True).clamp(min=1e-6)
     to_target /= dist
-    return torch.cat((joints_to_head, to_target), dim=-1)
+    return torch.cat((joints, joints_to_head, to_target), dim=-1)
 
 def obstacle_state(observations, n_joints):
     """Joint angles plus the head-egocentric [forward, lateral] vector to the nearest
@@ -193,8 +195,8 @@ class MLPBased_PiouretteController(NaivePiouretteController):
     def __init__(self, n_joints, state_fn=foraging_state, tau=20):
         super().__init__(n_joints, state_fn, tau)
         # self.weight = nn.Parameter(torch.zeros((self.n_joints + 2, 3)))
-        self.weight = nn.Parameter(torch.zeros((((self.n_joints - 1) * 2) + 2, 3)))
-        self.tau_layer = nn.Parameter(torch.zeros(((self.n_joints - 1) * 2) + 2,))
+        self.weight = nn.Parameter(torch.zeros((self.n_joints + ((self.n_joints - 1) * 2) + 2, 3)))
+        self.tau_layer = nn.Parameter(torch.zeros((self.n_joints + (self.n_joints - 1) * 2) + 2,))
 
         self.prev_controls = torch.tensor([0., 0., 1.0])
         # Per-env state, lazily (re)sized on first call / batch-size change.
@@ -265,7 +267,7 @@ class MLPBased_ReflexController(nn.Module):
         super().__init__()
         self.n_joints = n_joints
         self.state_fn = state_fn
-        self.weight = nn.Parameter(torch.zeros((((self.n_joints - 1) * 2) + 2, 3)))
+        self.weight = nn.Parameter(torch.zeros((self.n_joints + ((self.n_joints - 1) * 2) + 2, 3)))
 
     def forward(self, observations, n_joints=None):
         with torch.no_grad():
