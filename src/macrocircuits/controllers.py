@@ -217,8 +217,8 @@ class MLPBased_PiouretteController(NaivePiouretteController):
     def forward(self, observations, n_joints=None):
         with torch.no_grad():
             obs = self.state_fn(observations, self.n_joints)
-            sidx = (self.n_joints - 1)*2
-            to_target = obs[:, sidx:sidx+2]
+            sidx = self.n_joints + ((self.n_joints - 1)*2)
+            to_target = obs[:, sidx:]
             x = -torch.norm(to_target, dim=-1, keepdim=True)  # (batch, 1) per-env concentration
 
             batch_size = obs.shape[0]
