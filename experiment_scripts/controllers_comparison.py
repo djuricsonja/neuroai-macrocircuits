@@ -48,7 +48,7 @@ STEPS = int(2E6)
 # --> Define RUNS configuration
 print(f"Defining runs for {TASK.upper()} task")
 LABELS_CONTROLLERS = {
-    # 'ncap_ppo (mlp_reflex controller)': 'mlp_reflex_foraging',
+    'ncap_ppo (mlp_reflex controller)': 'mlp_reflex_foraging',
     'ncap_ppo (mlp_piourette controller)': 'mlp_piourette_foraging',
     # 'ncap_ppo (learned_steering controller)': 'learned_steering',
     # 'ncap_ppo (learned_steering minus warm_start controller)': 'learned_steering_no_warm_start',
