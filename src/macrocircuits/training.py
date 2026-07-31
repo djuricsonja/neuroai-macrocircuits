@@ -448,8 +448,8 @@ def train(
     trainer='tonic.Trainer()',
     before_training=None,
     after_training=None,
-    parallel=1,
-    sequential=1,
+    parallel=12,
+    sequential=40,
     seed=0,
 ):
     """
@@ -502,6 +502,10 @@ def train(
     # Initialize the logger to save data to the path environment/name/seed.
     path = os.path.join('data', 'local', 'experiments', 'tonic', environment_name, name)
     tonic.logger.initialize(path, script_path=None, config=args)
+
+    # Seed the environments (also spins up worker processes for Parallel).
+    environment.initialize(seed=seed)
+    test_environment.initialize(seed=seed + 10000)
 
     # Build the trainer.
     trainer = eval(trainer, namespace)
